@@ -155,7 +155,9 @@ function buildTree(
       } else {
         const camelName = toCamel(seg);
         if (!node.statics.has(camelName)) node.statics.set(camelName, { origName: seg, child: makeNode() });
-        node = node.statics.get(camelName)!.child;
+        const staticNode = node.statics.get(camelName);
+        if (!staticNode) throw new Error(`Missing static route node for segment ${seg}`);
+        node = staticNode.child;
       }
     }
     node.methods.set(route.method, { alias: route.alias, typeStr, ...req });
