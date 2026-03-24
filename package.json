@@ -1,0 +1,22 @@
+{
+  "name": "@elumixor/nitro-client",
+  "version": "0.1.0",
+  "description": "Generate a typed API client from Nitro route handlers",
+  "type": "module",
+  "bin": {
+    "nitro-client": "src/cli.ts"
+  },
+  "files": ["src"],
+  "scripts": {
+    "lint": "tsc --noEmit && biome check src",
+    "format": "biome format --write src"
+  },
+  "dependencies": {
+    "ts-morph": "^25.0.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.10",
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}
