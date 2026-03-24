@@ -12,7 +12,7 @@ If you use Bun, you can also run the CLI through `bunx` without a local install.
 
 ## Configuration
 
-Create a `nitro.config.ts` file in the project root:
+Create a `nitro-client.config.ts` file in the project root:
 
 ```ts
 export default {

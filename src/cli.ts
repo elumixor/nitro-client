@@ -13,7 +13,7 @@ const schema = z.object({
 });
 
 const config = await readConfig({
-  basename: "nitro.config",
+  basename: "nitro-client.config",
   schema,
 });
 
