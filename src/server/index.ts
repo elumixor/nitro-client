@@ -1,2 +1,3 @@
-export { type BaseContext, handler } from "./handler";
+export type { BaseContext } from "./handler";
+export { handler } from "./handler";
 export { interruptable } from "./sse";
