@@ -390,16 +390,14 @@ export interface NitroAPIOptions {
   fetch?: typeof fetch;
 }
 
-export type SSEEvent<E> = { [K in keyof E]: { type: K; data: E[K] } }[keyof E];
-
-export class EventStream<E extends Record<string, unknown>> {
+export class EventStream<E extends { type: string; data: unknown }> {
   readonly done: Promise<void>;
   private readonly _resolve: () => void;
   private readonly _reject: (err: Error) => void;
   private readonly _controller = new AbortController();
-  private readonly _buffer: SSEEvent<E>[] = [];
+  private readonly _buffer: E[] = [];
   private readonly _waiters: Array<() => void> = [];
-  private readonly _handlers = new Map<keyof E, Array<(data: unknown) => void>>();
+  private readonly _handlers = new Map<string, Array<(data: unknown) => void>>();
 
   constructor(baseUrl: string, path: string, method: string, body: unknown, customFetch: typeof fetch) {
     const { promise, resolve, reject } = Promise.withResolvers<void>();
@@ -447,10 +445,10 @@ export class EventStream<E extends Record<string, unknown>> {
             const raw = line.slice(5).trim();
             let data: unknown;
             try { data = JSON.parse(raw); } catch { data = raw; }
-            const evt = { type: curEvent as keyof E, data: data as E[keyof E] } as SSEEvent<E>;
+            const evt = { type: curEvent, data } as E;
             this._buffer.push(evt);
             for (const w of this._waiters.splice(0)) w();
-            for (const h of (this._handlers.get(curEvent as keyof E) ?? [])) h(data);
+            for (const h of (this._handlers.get(curEvent) ?? [])) h(data);
             curEvent = "";
           }
         }
@@ -467,13 +465,13 @@ export class EventStream<E extends Record<string, unknown>> {
 
   abort(): void { this._controller.abort(); }
 
-  on<K extends keyof E>(type: K, handler: (data: E[K]) => void): this {
+  on<T extends E["type"]>(type: T, handler: (data: Extract<E, { type: T }>["data"]) => void): this {
     if (!this._handlers.has(type)) this._handlers.set(type, []);
     this._handlers.get(type)!.push(handler as (data: unknown) => void);
     return this;
   }
 
-  [Symbol.asyncIterator](): AsyncGenerator<SSEEvent<E>> {
+  [Symbol.asyncIterator](): AsyncGenerator<E> {
     const self = this;
     let index = 0;
     return (async function* () {
@@ -491,7 +489,7 @@ export class EventStream<E extends Record<string, unknown>> {
 
 function _buildRoutes(
   doFetch: <T>(path: string, method: string, body?: unknown) => Promise<T>,
-  doSSE: <E extends Record<string, unknown>>(path: string, method: string, body?: unknown) => EventStream<E>,
+  doSSE: <E extends { type: string; data: unknown }>(path: string, method: string, body?: unknown) => EventStream<E>,
 ) {
   return ${clientBody};
 }
@@ -506,7 +504,7 @@ class _NitroAPIBase {
     Object.assign(this, _buildRoutes(this.doFetch.bind(this), this.doSSE.bind(this)));
   }
 
-  doSSE<E extends Record<string, unknown>>(path: string, method: string, body?: unknown): EventStream<E> {
+  doSSE<E extends { type: string; data: unknown }>(path: string, method: string, body?: unknown): EventStream<E> {
     return new EventStream<E>(this.$baseUrl, path, method, body, this.customFetch);
   }
 
