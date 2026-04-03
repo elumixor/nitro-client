@@ -12,7 +12,7 @@ interface RouteFile {
 }
 
 interface TreeNode {
-  methods: Map<Method, { alias: string; typeStr: string; body?: string; query?: string }>;
+  methods: Map<Method, { alias: string; typeStr: string; body?: string; query?: string; sseEvents?: string }>;
   statics: Map<string, { origName: string; child: TreeNode }>;
   param: { name: string; child: TreeNode } | null;
 }
@@ -114,6 +114,9 @@ function serializeRawType(type: ts.Type, checker: ts.TypeChecker, depth = 0, see
         if (name.startsWith("__") || name.startsWith("$")) return null;
         const propType = checker.getTypeOfSymbol(sym);
         const isOpt = !!(sym.flags & ts.SymbolFlags.Optional);
+        // Skip optional props with type exactly `undefined` — these come from TypeScript
+        // widening discriminated unions (e.g. `{ x?: undefined }` on variants that lack `x`)
+        if (isOpt && propType.flags & ts.TypeFlags.Undefined) return null;
         const key = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name) ? name : JSON.stringify(name);
         return `${key}${isOpt ? "?" : ""}: ${serializeRawType(propType, checker, depth + 1, seen)}`;
       })
@@ -140,6 +143,7 @@ function buildTree(
   routes: RouteFile[],
   typeMap: Map<string, string>,
   requestMap: Map<string, { body?: string; query?: string }>,
+  sseMap: Map<string, string>,
 ): TreeNode {
   const root = makeNode();
   for (const route of routes) {
@@ -160,7 +164,7 @@ function buildTree(
         node = staticNode.child;
       }
     }
-    node.methods.set(route.method, { alias: route.alias, typeStr, ...req });
+    node.methods.set(route.method, { alias: route.alias, typeStr, ...req, sseEvents: sseMap.get(route.alias) });
   }
   return root;
 }
@@ -168,18 +172,30 @@ function buildTree(
 function genNode(node: TreeNode, urlExpr: string): string {
   const parts: string[] = [];
 
-  for (const [method, { typeStr, body, query }] of node.methods) {
-    const hasBody = !["get"].includes(method);
-    const fn = hasBody
-      ? `(body?: unknown) => doFetch<${typeStr}>(\`${urlExpr}\`, "${method.toUpperCase()}", body)`
-      : `() => doFetch<${typeStr}>(\`${urlExpr}\`, "${method.toUpperCase()}")`;
-    const fnType = hasBody ? `(body?: unknown) => Promise<${typeStr}>` : `() => Promise<${typeStr}>`;
-    const phantom: string[] = [`$response: ${typeStr}`];
-    const requestParts: string[] = [];
-    if (body) requestParts.push(`body: ${body}`);
-    if (query) requestParts.push(`query: ${query}`);
-    if (requestParts.length > 0) phantom.push(`$request: { ${requestParts.join("; ")} }`);
-    parts.push(`$${method}: (${fn}) as unknown as (${fnType}) & { ${phantom.join("; ")} }`);
+  for (const [method, { typeStr, body, query, sseEvents }] of node.methods) {
+    if (sseEvents) {
+      // SSE route: returns EventStream instead of Promise
+      const fn = `(body?: unknown) => doSSE<${sseEvents}>(\`${urlExpr}\`, "${method.toUpperCase()}", body)`;
+      const fnType = `(body?: unknown) => EventStream<${sseEvents}>`;
+      const phantom: string[] = [`$response: EventStream<${sseEvents}>`];
+      const requestParts: string[] = [];
+      if (body) requestParts.push(`body: ${body}`);
+      if (query) requestParts.push(`query: ${query}`);
+      if (requestParts.length > 0) phantom.push(`$request: { ${requestParts.join("; ")} }`);
+      parts.push(`$${method}: (${fn}) as unknown as (${fnType}) & { ${phantom.join("; ")} }`);
+    } else {
+      const hasBody = !["get"].includes(method);
+      const fn = hasBody
+        ? `(body?: unknown) => doFetch<${typeStr}>(\`${urlExpr}\`, "${method.toUpperCase()}", body)`
+        : `() => doFetch<${typeStr}>(\`${urlExpr}\`, "${method.toUpperCase()}")`;
+      const fnType = hasBody ? `(body?: unknown) => Promise<${typeStr}>` : `() => Promise<${typeStr}>`;
+      const phantom: string[] = [`$response: ${typeStr}`];
+      const requestParts: string[] = [];
+      if (body) requestParts.push(`body: ${body}`);
+      if (query) requestParts.push(`query: ${query}`);
+      if (requestParts.length > 0) phantom.push(`$request: { ${requestParts.join("; ")} }`);
+      parts.push(`$${method}: (${fn}) as unknown as (${fnType}) & { ${phantom.join("; ")} }`);
+    }
   }
 
   for (const [camelName, { origName, child }] of node.statics)
@@ -253,6 +269,7 @@ export function generate(options: GenerateOptions) {
 
   const typeMap = new Map<string, string>();
   const requestMap = new Map<string, { body?: string; query?: string }>();
+  const sseMap = new Map<string, string>();
 
   for (const route of routes) {
     try {
@@ -281,8 +298,31 @@ export function generate(options: GenerateOptions) {
         const handlerCall = declNode as ts.CallExpression;
         const fnArg = handlerCall.arguments[handlerCall.arguments.length - 1];
         if (fnArg) {
-          const stmtTypes = collectReturnTypes(fnArg, checker);
-          if (stmtTypes && stmtTypes.length > 0) typeStr = [...new Set(stmtTypes)].join(" | ");
+          // Check if it's an async generator function (has asteriskToken)
+          const isGenerator =
+            fnArg.kind === ts.SyntaxKind.FunctionExpression && !!(fnArg as ts.FunctionExpression).asteriskToken;
+
+          if (isGenerator) {
+            const fnType = checker.getTypeAtLocation(fnArg);
+            const fnSigs = checker.getSignaturesOfType(fnType, ts.SignatureKind.Call);
+            const firstSig = fnSigs[0];
+            if (firstSig) {
+              const genReturnType = checker.getReturnTypeOfSignature(firstSig);
+              const symName = genReturnType.getSymbol()?.getName() ?? "";
+              if (symName === "AsyncGenerator" || symName === "Generator") {
+                const typeArgs = checker.getTypeArguments(genReturnType as ts.TypeReference);
+                const yieldType = typeArgs[0];
+                if (yieldType) {
+                  const yieldTypeStr = serializeRawType(yieldType, checker);
+                  sseMap.set(route.alias, yieldTypeStr);
+                  typeStr = yieldTypeStr;
+                }
+              }
+            }
+          } else {
+            const stmtTypes = collectReturnTypes(fnArg, checker);
+            if (stmtTypes && stmtTypes.length > 0) typeStr = [...new Set(stmtTypes)].join(" | ");
+          }
         }
       }
 
@@ -338,7 +378,7 @@ export function generate(options: GenerateOptions) {
     }
   }
 
-  const tree = buildTree(routes, typeMap, requestMap);
+  const tree = buildTree(routes, typeMap, requestMap, sseMap);
   const clientBody = genNode(tree, "");
 
   const output = `\
@@ -350,7 +390,109 @@ export interface NitroAPIOptions {
   fetch?: typeof fetch;
 }
 
-function _buildRoutes(doFetch: <T>(path: string, method: string, body?: unknown) => Promise<T>) {
+export type SSEEvent<E> = { [K in keyof E]: { type: K; data: E[K] } }[keyof E];
+
+export class EventStream<E extends Record<string, unknown>> {
+  readonly done: Promise<void>;
+  private readonly _resolve: () => void;
+  private readonly _reject: (err: Error) => void;
+  private readonly _controller = new AbortController();
+  private readonly _buffer: SSEEvent<E>[] = [];
+  private readonly _waiters: Array<() => void> = [];
+  private readonly _handlers = new Map<keyof E, Array<(data: unknown) => void>>();
+
+  constructor(baseUrl: string, path: string, method: string, body: unknown, customFetch: typeof fetch) {
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    this.done = promise;
+    this._resolve = resolve;
+    this._reject = reject;
+    void this._start(baseUrl, path, method, body, customFetch);
+  }
+
+  private async _start(baseUrl: string, path: string, method: string, body: unknown, customFetch: typeof fetch): Promise<void> {
+    const headers: Record<string, string> = { Accept: "text/event-stream" };
+    if (body !== undefined && !(body instanceof FormData)) headers["Content-Type"] = "application/json";
+    let res: Response;
+    try {
+      res = await customFetch(\`\${baseUrl}\${path}\`, {
+        method,
+        headers,
+        body: body instanceof FormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
+        signal: this._controller.signal,
+      });
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      if (err.name === "AbortError") { this._resolve(); return; }
+      this._reject(err);
+      return;
+    }
+    if (!res.ok || !res.body) {
+      this._reject(new Error(\`API error \${res.status}: \${await res.text().catch(() => "")}\`));
+      return;
+    }
+    const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = "";
+    let curEvent = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += value;
+        const lines = buf.split("\\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (line.startsWith("event:")) {
+            curEvent = line.slice(6).trim();
+          } else if (line.startsWith("data:") && curEvent) {
+            const raw = line.slice(5).trim();
+            let data: unknown;
+            try { data = JSON.parse(raw); } catch { data = raw; }
+            const evt = { type: curEvent as keyof E, data: data as E[keyof E] } as SSEEvent<E>;
+            this._buffer.push(evt);
+            for (const w of this._waiters.splice(0)) w();
+            for (const h of (this._handlers.get(curEvent as keyof E) ?? [])) h(data);
+            curEvent = "";
+          }
+        }
+      }
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      if (err.name !== "AbortError") { this._reject(err); return; }
+    } finally {
+      reader.cancel();
+    }
+    this._resolve();
+    for (const w of this._waiters.splice(0)) w();
+  }
+
+  abort(): void { this._controller.abort(); }
+
+  on<K extends keyof E>(type: K, handler: (data: E[K]) => void): this {
+    if (!this._handlers.has(type)) this._handlers.set(type, []);
+    this._handlers.get(type)!.push(handler as (data: unknown) => void);
+    return this;
+  }
+
+  [Symbol.asyncIterator](): AsyncGenerator<SSEEvent<E>> {
+    const self = this;
+    let index = 0;
+    return (async function* () {
+      while (true) {
+        if (index < self._buffer.length) { yield self._buffer[index++]!; continue; }
+        await new Promise<void>((resolve) => {
+          self._waiters.push(resolve);
+          void self.done.then(resolve, resolve);
+        });
+        if (index >= self._buffer.length) return;
+      }
+    })();
+  }
+}
+
+function _buildRoutes(
+  doFetch: <T>(path: string, method: string, body?: unknown) => Promise<T>,
+  doSSE: <E extends Record<string, unknown>>(path: string, method: string, body?: unknown) => EventStream<E>,
+) {
   return ${clientBody};
 }
 
@@ -361,7 +503,11 @@ class _NitroAPIBase {
   constructor(options: NitroAPIOptions) {
     this.$baseUrl = options.baseUrl;
     this.customFetch = options.fetch ?? fetch;
-    Object.assign(this, _buildRoutes(this.doFetch.bind(this)));
+    Object.assign(this, _buildRoutes(this.doFetch.bind(this), this.doSSE.bind(this)));
+  }
+
+  doSSE<E extends Record<string, unknown>>(path: string, method: string, body?: unknown): EventStream<E> {
+    return new EventStream<E>(this.$baseUrl, path, method, body, this.customFetch);
   }
 
   private async doFetch<T>(path: string, method: string, body?: unknown): Promise<T> {
