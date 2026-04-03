@@ -12,7 +12,7 @@ interface RouteFile {
 }
 
 interface TreeNode {
-  methods: Map<Method, { alias: string; typeStr: string; body?: string; query?: string; sseEvents?: string }>;
+  methods: Map<Method, { alias: string; typeStr: string; body?: string; query?: string; streamType?: string }>;
   statics: Map<string, { origName: string; child: TreeNode }>;
   param: { name: string; child: TreeNode } | null;
 }
@@ -143,7 +143,7 @@ function buildTree(
   routes: RouteFile[],
   typeMap: Map<string, string>,
   requestMap: Map<string, { body?: string; query?: string }>,
-  sseMap: Map<string, string>,
+  streamMap: Map<string, string>,
 ): TreeNode {
   const root = makeNode();
   for (const route of routes) {
@@ -164,7 +164,7 @@ function buildTree(
         node = staticNode.child;
       }
     }
-    node.methods.set(route.method, { alias: route.alias, typeStr, ...req, sseEvents: sseMap.get(route.alias) });
+    node.methods.set(route.method, { alias: route.alias, typeStr, ...req, streamType: streamMap.get(route.alias) });
   }
   return root;
 }
@@ -172,12 +172,12 @@ function buildTree(
 function genNode(node: TreeNode, urlExpr: string): string {
   const parts: string[] = [];
 
-  for (const [method, { typeStr, body, query, sseEvents }] of node.methods) {
-    if (sseEvents) {
-      // SSE route: returns EventStream instead of Promise
-      const fn = `(body?: unknown) => doSSE<${sseEvents}>(\`${urlExpr}\`, "${method.toUpperCase()}", body)`;
-      const fnType = `(body?: unknown) => EventStream<${sseEvents}>`;
-      const phantom: string[] = [`$response: EventStream<${sseEvents}>`];
+  for (const [method, { typeStr, body, query, streamType }] of node.methods) {
+    if (streamType) {
+      // Streaming route: returns Stream instead of Promise
+      const fn = `(body?: unknown) => doStream<${streamType}>(\`${urlExpr}\`, "${method.toUpperCase()}", body)`;
+      const fnType = `(body?: unknown) => Stream<${streamType}>`;
+      const phantom: string[] = [`$response: Stream<${streamType}>`];
       const requestParts: string[] = [];
       if (body) requestParts.push(`body: ${body}`);
       if (query) requestParts.push(`query: ${query}`);
@@ -269,7 +269,7 @@ export function generate(options: GenerateOptions) {
 
   const typeMap = new Map<string, string>();
   const requestMap = new Map<string, { body?: string; query?: string }>();
-  const sseMap = new Map<string, string>();
+  const streamMap = new Map<string, string>();
 
   for (const route of routes) {
     try {
@@ -314,7 +314,7 @@ export function generate(options: GenerateOptions) {
                 const yieldType = typeArgs[0];
                 if (yieldType) {
                   const yieldTypeStr = serializeRawType(yieldType, checker);
-                  sseMap.set(route.alias, yieldTypeStr);
+                  streamMap.set(route.alias, yieldTypeStr);
                   typeStr = yieldTypeStr;
                 }
               }
@@ -378,7 +378,7 @@ export function generate(options: GenerateOptions) {
     }
   }
 
-  const tree = buildTree(routes, typeMap, requestMap, sseMap);
+  const tree = buildTree(routes, typeMap, requestMap, streamMap);
   const clientBody = genNode(tree, "");
 
   const output = `\
@@ -390,14 +390,13 @@ export interface NitroAPIOptions {
   fetch?: typeof fetch;
 }
 
-export class EventStream<E extends { type: string; data: unknown }> {
+export class Stream<E> {
   readonly done: Promise<void>;
   private readonly _resolve: () => void;
   private readonly _reject: (err: Error) => void;
   private readonly _controller = new AbortController();
   private readonly _buffer: E[] = [];
   private readonly _waiters: Array<() => void> = [];
-  private readonly _handlers = new Map<string, Array<(data: unknown) => void>>();
 
   constructor(baseUrl: string, path: string, method: string, body: unknown, customFetch: typeof fetch) {
     const { promise, resolve, reject } = Promise.withResolvers<void>();
@@ -430,7 +429,6 @@ export class EventStream<E extends { type: string; data: unknown }> {
     }
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
     let buf = "";
-    let curEvent = "";
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -439,18 +437,17 @@ export class EventStream<E extends { type: string; data: unknown }> {
         const lines = buf.split("\\n");
         buf = lines.pop() ?? "";
         for (const line of lines) {
-          if (line.startsWith("event:")) {
-            curEvent = line.slice(6).trim();
-          } else if (line.startsWith("data:") && curEvent) {
-            const raw = line.slice(5).trim();
-            let data: unknown;
-            try { data = JSON.parse(raw); } catch { data = raw; }
-            const evt = { type: curEvent, data } as E;
-            this._buffer.push(evt);
-            for (const w of this._waiters.splice(0)) w();
-            for (const h of (this._handlers.get(curEvent) ?? [])) h(data);
-            curEvent = "";
+          if (!line.startsWith("data:")) continue;
+          const raw = line.slice(5).trim();
+          if (!raw) continue;
+          let data: unknown;
+          try { data = JSON.parse(raw); } catch { data = raw; }
+          if (data && typeof data === "object" && "__error" in data) {
+            this._reject(new Error((data as { __error: string }).__error));
+            return;
           }
+          this._buffer.push(data as E);
+          for (const w of this._waiters.splice(0)) w();
         }
       }
     } catch (e) {
@@ -464,12 +461,6 @@ export class EventStream<E extends { type: string; data: unknown }> {
   }
 
   abort(): void { this._controller.abort(); }
-
-  on<T extends E["type"]>(type: T, handler: (data: Extract<E, { type: T }>["data"]) => void): this {
-    if (!this._handlers.has(type)) this._handlers.set(type, []);
-    this._handlers.get(type)!.push(handler as (data: unknown) => void);
-    return this;
-  }
 
   [Symbol.asyncIterator](): AsyncGenerator<E> {
     const self = this;
@@ -489,7 +480,7 @@ export class EventStream<E extends { type: string; data: unknown }> {
 
 function _buildRoutes(
   doFetch: <T>(path: string, method: string, body?: unknown) => Promise<T>,
-  doSSE: <E extends { type: string; data: unknown }>(path: string, method: string, body?: unknown) => EventStream<E>,
+  doStream: <E>(path: string, method: string, body?: unknown) => Stream<E>,
 ) {
   return ${clientBody};
 }
@@ -501,11 +492,11 @@ class _NitroAPIBase {
   constructor(options: NitroAPIOptions) {
     this.$baseUrl = options.baseUrl;
     this.customFetch = options.fetch ?? fetch;
-    Object.assign(this, _buildRoutes(this.doFetch.bind(this), this.doSSE.bind(this)));
+    Object.assign(this, _buildRoutes(this.doFetch.bind(this), this.doStream.bind(this)));
   }
 
-  doSSE<E extends { type: string; data: unknown }>(path: string, method: string, body?: unknown): EventStream<E> {
-    return new EventStream<E>(this.$baseUrl, path, method, body, this.customFetch);
+  doStream<E>(path: string, method: string, body?: unknown): Stream<E> {
+    return new Stream<E>(this.$baseUrl, path, method, body, this.customFetch);
   }
 
   private async doFetch<T>(path: string, method: string, body?: unknown): Promise<T> {
