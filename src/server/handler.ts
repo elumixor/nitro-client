@@ -1,5 +1,5 @@
-import type { EventHandler, EventHandlerRequest, H3Event } from "h3";
-import { defineEventHandler, getRouterParam, getValidatedQuery, readValidatedBody } from "h3";
+import type { EventHandler, EventHandlerRequest, H3Event, MultiPartData } from "h3";
+import { defineEventHandler, getRouterParam, getValidatedQuery, readMultipartFormData, readValidatedBody } from "h3";
 import { type ZodType, z } from "zod";
 import { sendSSEGenerator } from "./sse";
 
@@ -16,6 +16,7 @@ export type BaseContext = {
   event: H3Event;
   router: Record<string, string>;
   signal: AbortSignal;
+  formDataParts: Promise<MultiPartData[] | undefined>;
 };
 
 type ContextExtensions<E extends Record<string, (event: H3Event) => unknown>> = {
@@ -39,7 +40,8 @@ function buildContext<E extends Record<string, (event: H3Event) => unknown>>(
   event: H3Event,
   extensions: E,
 ): BaseContext & ContextExtensions<E> {
-  const base: BaseContext = { event, router: routerProxy(event), signal: makeAbortSignal(event) };
+  const base = { event, router: routerProxy(event), signal: makeAbortSignal(event) } as BaseContext;
+  Reflect.defineProperty(base, "formDataParts", { get: () => readMultipartFormData(event), enumerable: true });
   for (const key of Object.keys(extensions)) {
     const getter = extensions[key];
     if (getter) Reflect.defineProperty(base, key, { get: () => getter(event), enumerable: true });
@@ -67,7 +69,9 @@ export function createHandler<E extends Record<string, (event: H3Event) => unkno
           return sendSSEGenerator(event, gen);
         });
       }
-      return defineEventHandler(async (event) => schemasOrFn(buildContext(event, ext) as Ctx));
+      return defineEventHandler((event) => {
+        return schemasOrFn(buildContext(event, ext) as Ctx);
+      });
     }
 
     const { body, query } = schemasOrFn;
@@ -84,13 +88,13 @@ export function createHandler<E extends Record<string, (event: H3Event) => unkno
       });
     }
 
-    return defineEventHandler(async (event) =>
-      (fn as (context: Inferred<S> & Ctx) => unknown)({
+    return defineEventHandler(async (event) => {
+      return (fn as (context: Inferred<S> & Ctx) => unknown)({
         ...buildContext(event, ext),
         body: body ? await readValidatedBody(event, (data) => z.object(body).parse(data)) : undefined,
         query: query ? await getValidatedQuery(event, (data) => z.object(query).parse(data)) : undefined,
-      } as Inferred<S> & Ctx),
-    );
+      } as Inferred<S> & Ctx);
+    });
   }
 
   return handler;

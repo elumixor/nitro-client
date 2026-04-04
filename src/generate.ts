@@ -188,7 +188,8 @@ function genNode(node: TreeNode, urlExpr: string): string {
       const retPart = streamReturnType ? `, ${streamReturnType}` : "";
       const fn = `(body?: unknown) => doStream<${streamType}${retPart}>(\`${urlExpr}\`, "${method.toUpperCase()}", body)`;
       const fnType = `(body?: unknown) => Stream<${streamType}${retPart}>`;
-      const phantom: string[] = [`$response: Stream<${streamType}${retPart}>`];
+      const responseType = streamReturnType ?? streamType;
+      const phantom: string[] = [`$response: ${responseType}`, `$yield: ${streamType}`];
       const requestParts: string[] = [];
       if (body) requestParts.push(`body: ${body}`);
       if (query) requestParts.push(`query: ${query}`);
@@ -218,10 +219,46 @@ function genNode(node: TreeNode, urlExpr: string): string {
 
   const { name: paramName, child } = node.param;
   const childUrl = `${urlExpr}/\${${paramName}}`;
-  const callableFn = `(${paramName}: string) => (${genNode(child, childUrl)})`;
+  const innerNode = genNode(child, childUrl);
 
-  if (parts.length === 0) return callableFn;
-  return `Object.assign(${callableFn}, ${staticObj})`;
+  // IIFE so we can reference ReturnType<typeof _fn> for the $param phantom
+  // Enables: typeof api.things.$param.$get.$response
+  const iife = `(() => { const _fn = (${paramName}: string) => (${innerNode}); return Object.assign(_fn, { ${[...parts, `$param: undefined as unknown as ReturnType<typeof _fn>`].join(", ")} }); })()`;
+
+  return iife;
+}
+
+function unwrapPromise(type: ts.Type, checker: ts.TypeChecker): ts.Type {
+  const sn = type.getSymbol()?.getName() ?? "";
+  const isThenable = sn.includes("Promise") || checker.getPropertiesOfType(type).some((p) => p.getName() === "then");
+  if (!isThenable) return type;
+
+  // Try direct type arguments first (works for standard Promise<T>)
+  const args = checker.getTypeArguments(type as ts.TypeReference);
+  if (args[0]) return args[0];
+
+  // Fallback: extract resolved type from then() callback parameter
+  // Works for PrismaPromise and other custom thenables
+  const thenProp = type.getProperty("then");
+  if (thenProp) {
+    const thenType = checker.getTypeOfSymbol(thenProp);
+    const thenSigs = checker.getSignaturesOfType(thenType, ts.SignatureKind.Call);
+    const firstSig = thenSigs[0];
+    if (firstSig) {
+      const firstParam = firstSig.getParameters()[0];
+      if (firstParam) {
+        const cbType = checker.getTypeOfSymbol(firstParam);
+        const cbSigs = checker.getSignaturesOfType(cbType, ts.SignatureKind.Call);
+        const cbSig = cbSigs[0];
+        if (cbSig) {
+          const cbParams = cbSig.getParameters();
+          if (cbParams[0]) return checker.getTypeOfSymbol(cbParams[0]);
+        }
+      }
+    }
+  }
+
+  return type;
 }
 
 function collectReturnTypes(fn: ts.Node, checker: ts.TypeChecker): string[] | null {
@@ -239,12 +276,7 @@ function collectReturnTypes(fn: ts.Node, checker: ts.TypeChecker): string[] | nu
       const expr = (node as ts.ReturnStatement).expression;
       if (!expr) return;
       let retType = checker.getTypeAtLocation(expr);
-      const sn = retType.getSymbol()?.getName() ?? "";
-      if (sn.includes("Promise") || checker.getPropertiesOfType(retType).some((p) => p.getName() === "then")) {
-        const args = checker.getTypeArguments(retType as ts.TypeReference);
-        const first = args[0];
-        if (first) retType = first;
-      }
+      retType = unwrapPromise(retType, checker);
       types.push(serializeRawType(retType, checker));
       return;
     }
@@ -349,15 +381,7 @@ export function generate(options: GenerateOptions) {
           continue;
         }
         let returnType = checker.getReturnTypeOfSignature(sig);
-        const symName = returnType.getSymbol()?.getName() ?? "";
-        if (
-          symName.includes("Promise") ||
-          checker.getPropertiesOfType(returnType).some((p) => p.getName() === "then")
-        ) {
-          const args = checker.getTypeArguments(returnType as ts.TypeReference);
-          const first = args[0];
-          if (first) returnType = first;
-        }
+        returnType = unwrapPromise(returnType, checker);
         typeStr = serializeRawType(returnType, checker);
       }
 

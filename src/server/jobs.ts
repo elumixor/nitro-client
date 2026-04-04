@@ -1,3 +1,13 @@
+import type { EventHandler, EventHandlerRequest } from "h3";
+
+/** Extracts the AsyncGenerator yield type from a streaming EventHandler */
+type StreamYield<H> =
+  H extends EventHandler<EventHandlerRequest, AsyncGenerator<infer Y, unknown, unknown>> ? Y : unknown;
+
+/** Extracts the AsyncGenerator return type from a streaming EventHandler */
+type StreamReturn<H> =
+  H extends EventHandler<EventHandlerRequest, AsyncGenerator<unknown, infer R, unknown>> ? R : never;
+
 const JOB_SENTINEL = Symbol("startJob");
 
 export interface StartJobMarker {
@@ -57,24 +67,7 @@ export function failJob(id: string, error: Error) {
   jobs.delete(id);
 }
 
-export async function* findJob(id: string): AsyncGenerator<unknown, unknown, undefined> {
-  const job = jobs.get(id);
-  if (!job) return null;
-
-  // Replay buffered events
-  let index = 0;
-  while (index < job.buffer.length) {
-    const entry = job.buffer[index++];
-    if (!entry) continue;
-    if (entry.type === "event") yield entry.data;
-    else if (entry.type === "return") return entry.data;
-    else throw entry.data;
-  }
-
-  // If job already completed during replay
-  if (job.done) return undefined;
-
-  // Subscribe for live events
+function replayJob(job: Job): AsyncGenerator<unknown, unknown> {
   const queue: Entry[] = [];
   let waiter: (() => void) | null = null;
 
@@ -86,22 +79,47 @@ export async function* findJob(id: string): AsyncGenerator<unknown, unknown, und
     }
   };
 
-  job.subscribers.add(callback);
-  try {
-    while (true) {
-      if (queue.length > 0) {
-        const entry = queue.shift();
-        if (!entry) continue;
-        if (entry.type === "event") yield entry.data;
-        else if (entry.type === "return") return entry.data;
-        else throw entry.data;
-      } else {
-        await new Promise<void>((resolve) => {
-          waiter = resolve;
-        });
-      }
+  return (async function* () {
+    // Replay buffered events
+    let index = 0;
+    while (index < job.buffer.length) {
+      const entry = job.buffer[index++];
+      if (!entry) continue;
+      if (entry.type === "event") yield entry.data;
+      else if (entry.type === "return") return entry.data;
+      else throw entry.data;
     }
-  } finally {
-    job.subscribers.delete(callback);
-  }
+
+    // If job already completed during replay
+    if (job.done) return undefined;
+
+    // Subscribe for live events
+    job.subscribers.add(callback);
+    try {
+      while (true) {
+        if (queue.length > 0) {
+          const entry = queue.shift();
+          if (!entry) continue;
+          if (entry.type === "event") yield entry.data;
+          else if (entry.type === "return") return entry.data;
+          else throw entry.data;
+        } else {
+          await new Promise<void>((resolve) => {
+            waiter = resolve;
+          });
+        }
+      }
+    } finally {
+      job.subscribers.delete(callback);
+    }
+  })();
+}
+
+/** Returns an async generator that replays the job's events, or `undefined` if no active job exists. */
+export function findJob<H = EventHandler<EventHandlerRequest, AsyncGenerator<unknown, unknown, unknown>>>(
+  id: string,
+): AsyncGenerator<StreamYield<H>, StreamReturn<H>> | undefined {
+  const job = jobs.get(id);
+  if (!job) return undefined;
+  return replayJob(job) as AsyncGenerator<StreamYield<H>, StreamReturn<H>>;
 }
