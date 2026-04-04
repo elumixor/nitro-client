@@ -12,11 +12,14 @@ type InferSchema<S extends SchemaInput> = S extends ZodType
 
 type Inferred<S extends Schemas> = { [K in keyof S]: S[K] extends SchemaInput ? InferSchema<S[K]> : never };
 
-export type BaseContext<User = unknown> = {
+export type BaseContext = {
   event: H3Event;
-  user: User;
   router: Record<string, string>;
   signal: AbortSignal;
+};
+
+type ContextExtensions<E extends Record<string, (event: H3Event) => unknown>> = {
+  [K in keyof E]: ReturnType<E[K]>;
 };
 
 const routerProxy = (event: H3Event) =>
@@ -32,8 +35,23 @@ function makeAbortSignal(event: H3Event): AbortSignal {
   return ac.signal;
 }
 
-export function createHandler<User = unknown>() {
-  type Ctx = BaseContext<User>;
+function buildContext<E extends Record<string, (event: H3Event) => unknown>>(
+  event: H3Event,
+  extensions: E,
+): BaseContext & ContextExtensions<E> {
+  const base: BaseContext = { event, router: routerProxy(event), signal: makeAbortSignal(event) };
+  for (const key of Object.keys(extensions)) {
+    const getter = extensions[key];
+    if (getter) Reflect.defineProperty(base, key, { get: () => getter(event), enumerable: true });
+  }
+  return base as BaseContext & ContextExtensions<E>;
+}
+
+export function createHandler<E extends Record<string, (event: H3Event) => unknown> = Record<string, never>>(
+  extensions?: E,
+) {
+  type Ctx = BaseContext & ContextExtensions<E>;
+  const ext = extensions ?? ({} as E);
 
   function handler<S extends Schemas, R>(
     schemas: S,
@@ -47,23 +65,11 @@ export function createHandler<User = unknown>() {
     if (typeof schemasOrFn === "function") {
       if (isGeneratorFn(schemasOrFn)) {
         return defineEventHandler((event) => {
-          const gen = schemasOrFn({
-            event,
-            user: event.context.user,
-            router: routerProxy(event),
-            signal: makeAbortSignal(event),
-          } as Ctx) as AsyncGenerator<unknown>;
+          const gen = schemasOrFn(buildContext(event, ext) as Ctx) as AsyncGenerator<unknown>;
           return sendSSEGenerator(event, gen);
         });
       }
-      return defineEventHandler(async (event) =>
-        schemasOrFn({
-          event,
-          user: event.context.user,
-          router: routerProxy(event),
-          signal: makeAbortSignal(event),
-        } as Ctx),
-      );
+      return defineEventHandler(async (event) => schemasOrFn(buildContext(event, ext) as Ctx));
     }
 
     const { body, query } = schemasOrFn;
@@ -71,12 +77,9 @@ export function createHandler<User = unknown>() {
     if (fn && isGeneratorFn(fn)) {
       return defineEventHandler(async (event) => {
         const context = {
-          event,
+          ...buildContext(event, ext),
           body: body ? await readValidatedBody(event, (data) => z.object(body).parse(data)) : undefined,
           query: query ? await getValidatedQuery(event, (data) => z.object(query).parse(data)) : undefined,
-          router: routerProxy(event),
-          user: event.context.user,
-          signal: makeAbortSignal(event),
         } as Inferred<S> & Ctx;
         const gen = fn(context) as AsyncGenerator<unknown>;
         return sendSSEGenerator(event, gen);
@@ -85,12 +88,9 @@ export function createHandler<User = unknown>() {
 
     return defineEventHandler(async (event) =>
       (fn as (context: Inferred<S> & Ctx) => unknown)({
-        event,
+        ...buildContext(event, ext),
         body: body ? await readValidatedBody(event, (data) => z.object(body).parse(data)) : undefined,
         query: query ? await getValidatedQuery(event, (data) => z.object(query).parse(data)) : undefined,
-        router: routerProxy(event),
-        user: event.context.user,
-        signal: makeAbortSignal(event),
       } as Inferred<S> & Ctx),
     );
   }
