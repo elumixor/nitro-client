@@ -8,17 +8,23 @@
   },
   "type": "module",
   "exports": {
-    ".": "./src/generate.ts",
-    "./server": "./src/server/index.ts"
+    ".": {
+      "types": "./dist/generate.d.ts",
+      "default": "./dist/generate.js"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "default": "./dist/server/index.js"
+    }
   },
   "bin": {
-    "nitro-client": "src/cli.ts"
+    "nitro-client": "dist/cli.js"
   },
   "files": [
-    "src"
+    "dist"
   ],
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
     "lint": "tsc --noEmit && biome check src",
     "test": "npm run build && npm run lint",
     "format": "biome format --write src",
