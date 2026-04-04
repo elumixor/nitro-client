@@ -12,7 +12,10 @@ interface RouteFile {
 }
 
 interface TreeNode {
-  methods: Map<Method, { alias: string; typeStr: string; body?: string; query?: string; streamType?: string }>;
+  methods: Map<
+    Method,
+    { alias: string; typeStr: string; body?: string; query?: string; streamType?: string; streamReturnType?: string }
+  >;
   statics: Map<string, { origName: string; child: TreeNode }>;
   param: { name: string; child: TreeNode } | null;
 }
@@ -143,12 +146,13 @@ function buildTree(
   routes: RouteFile[],
   typeMap: Map<string, string>,
   requestMap: Map<string, { body?: string; query?: string }>,
-  streamMap: Map<string, string>,
+  streamMap: Map<string, { yield: string; return?: string }>,
 ): TreeNode {
   const root = makeNode();
   for (const route of routes) {
     const typeStr = typeMap.get(route.alias) ?? "unknown";
     const req = requestMap.get(route.alias);
+    const stream = streamMap.get(route.alias);
     let node = root;
     const segments = route.urlPath === "/" ? [] : route.urlPath.split("/").filter(Boolean);
     for (const seg of segments) {
@@ -164,7 +168,13 @@ function buildTree(
         node = staticNode.child;
       }
     }
-    node.methods.set(route.method, { alias: route.alias, typeStr, ...req, streamType: streamMap.get(route.alias) });
+    node.methods.set(route.method, {
+      alias: route.alias,
+      typeStr,
+      ...req,
+      streamType: stream?.yield,
+      streamReturnType: stream?.return,
+    });
   }
   return root;
 }
@@ -172,12 +182,13 @@ function buildTree(
 function genNode(node: TreeNode, urlExpr: string): string {
   const parts: string[] = [];
 
-  for (const [method, { typeStr, body, query, streamType }] of node.methods) {
+  for (const [method, { typeStr, body, query, streamType, streamReturnType }] of node.methods) {
     if (streamType) {
       // Streaming route: returns Stream instead of Promise
-      const fn = `(body?: unknown) => doStream<${streamType}>(\`${urlExpr}\`, "${method.toUpperCase()}", body)`;
-      const fnType = `(body?: unknown) => Stream<${streamType}>`;
-      const phantom: string[] = [`$response: Stream<${streamType}>`];
+      const retPart = streamReturnType ? `, ${streamReturnType}` : "";
+      const fn = `(body?: unknown) => doStream<${streamType}${retPart}>(\`${urlExpr}\`, "${method.toUpperCase()}", body)`;
+      const fnType = `(body?: unknown) => Stream<${streamType}${retPart}>`;
+      const phantom: string[] = [`$response: Stream<${streamType}${retPart}>`];
       const requestParts: string[] = [];
       if (body) requestParts.push(`body: ${body}`);
       if (query) requestParts.push(`query: ${query}`);
@@ -269,7 +280,7 @@ export function generate(options: GenerateOptions) {
 
   const typeMap = new Map<string, string>();
   const requestMap = new Map<string, { body?: string; query?: string }>();
-  const streamMap = new Map<string, string>();
+  const streamMap = new Map<string, { yield: string; return?: string }>();
 
   for (const route of routes) {
     try {
@@ -314,7 +325,12 @@ export function generate(options: GenerateOptions) {
                 const yieldType = typeArgs[0];
                 if (yieldType) {
                   const yieldTypeStr = serializeRawType(yieldType, checker);
-                  streamMap.set(route.alias, yieldTypeStr);
+                  const returnType = typeArgs[1];
+                  const returnTypeStr =
+                    returnType && !(returnType.flags & (ts.TypeFlags.Void | ts.TypeFlags.Undefined))
+                      ? serializeRawType(returnType, checker)
+                      : undefined;
+                  streamMap.set(route.alias, { yield: yieldTypeStr, return: returnTypeStr });
                   typeStr = yieldTypeStr;
                 }
               }
@@ -390,16 +406,18 @@ export interface NitroAPIOptions {
   fetch?: typeof fetch;
 }
 
-export class Stream<E> {
-  readonly done: Promise<void>;
-  private readonly _resolve: () => void;
+export class Stream<E, R = void> {
+  readonly done: Promise<R>;
+  jobId: string | undefined;
+  private readonly _resolve: (value: R) => void;
   private readonly _reject: (err: Error) => void;
   private readonly _controller = new AbortController();
   private readonly _buffer: E[] = [];
   private readonly _waiters: Array<() => void> = [];
+  private _returnValue: R | undefined;
 
   constructor(baseUrl: string, path: string, method: string, body: unknown, customFetch: typeof fetch) {
-    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    const { promise, resolve, reject } = Promise.withResolvers<R>();
     this.done = promise;
     this._resolve = resolve;
     this._reject = reject;
@@ -419,7 +437,7 @@ export class Stream<E> {
       });
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
-      if (err.name === "AbortError") { this._resolve(); return; }
+      if (err.name === "AbortError") { this._resolve(undefined as R); return; }
       this._reject(err);
       return;
     }
@@ -427,8 +445,18 @@ export class Stream<E> {
       this._reject(new Error(\`API error \${res.status}: \${await res.text().catch(() => "")}\`));
       return;
     }
+    // If server returned JSON (not SSE), treat as immediate return value
+    const ct = res.headers.get("content-type") ?? "";
+    if (ct.includes("application/json")) {
+      const text = await res.text();
+      try { this._returnValue = JSON.parse(text) as R; } catch { this._returnValue = text as R; }
+      this._resolve(this._returnValue as R);
+      for (const w of this._waiters.splice(0)) w();
+      return;
+    }
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
     let buf = "";
+    let currentEvent = "";
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -437,17 +465,33 @@ export class Stream<E> {
         const lines = buf.split("\\n");
         buf = lines.pop() ?? "";
         for (const line of lines) {
-          if (!line.startsWith("data:")) continue;
+          if (line.startsWith("event:")) { currentEvent = line.slice(6).trim(); continue; }
+          if (!line.startsWith("data:")) { if (line === "") currentEvent = ""; continue; }
           const raw = line.slice(5).trim();
           if (!raw) continue;
           let data: unknown;
           try { data = JSON.parse(raw); } catch { data = raw; }
-          if (data && typeof data === "object" && "__error" in data) {
-            this._reject(new Error((data as { __error: string }).__error));
+          if (currentEvent === "__error" || (data && typeof data === "object" && "__error" in data)) {
+            const msg = currentEvent === "__error"
+              ? (data as { message: string }).message
+              : (data as { __error: string }).__error;
+            this._reject(new Error(msg));
+            currentEvent = "";
             return;
+          }
+          if (currentEvent === "__job") {
+            this.jobId = (data as { id: string }).id;
+            currentEvent = "";
+            continue;
+          }
+          if (currentEvent === "__return") {
+            this._returnValue = data as R;
+            currentEvent = "";
+            continue;
           }
           this._buffer.push(data as E);
           for (const w of this._waiters.splice(0)) w();
+          currentEvent = "";
         }
       }
     } catch (e) {
@@ -456,7 +500,7 @@ export class Stream<E> {
     } finally {
       reader.cancel();
     }
-    this._resolve();
+    this._resolve(this._returnValue !== undefined ? this._returnValue : undefined as R);
     for (const w of this._waiters.splice(0)) w();
   }
 
@@ -470,7 +514,7 @@ export class Stream<E> {
         if (index < self._buffer.length) { yield self._buffer[index++]!; continue; }
         await new Promise<void>((resolve) => {
           self._waiters.push(resolve);
-          void self.done.then(resolve, resolve);
+          void self.done.then(() => resolve(), () => resolve());
         });
         if (index >= self._buffer.length) return;
       }
@@ -480,7 +524,7 @@ export class Stream<E> {
 
 function _buildRoutes(
   doFetch: <T>(path: string, method: string, body?: unknown) => Promise<T>,
-  doStream: <E>(path: string, method: string, body?: unknown) => Stream<E>,
+  doStream: <E, R = void>(path: string, method: string, body?: unknown) => Stream<E, R>,
 ) {
   return ${clientBody};
 }
@@ -495,8 +539,8 @@ class _NitroAPIBase {
     Object.assign(this, _buildRoutes(this.doFetch.bind(this), this.doStream.bind(this)));
   }
 
-  doStream<E>(path: string, method: string, body?: unknown): Stream<E> {
-    return new Stream<E>(this.$baseUrl, path, method, body, this.customFetch);
+  doStream<E, R = void>(path: string, method: string, body?: unknown): Stream<E, R> {
+    return new Stream<E, R>(this.$baseUrl, path, method, body, this.customFetch);
   }
 
   private async doFetch<T>(path: string, method: string, body?: unknown): Promise<T> {
