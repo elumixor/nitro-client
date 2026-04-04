@@ -64,7 +64,8 @@ export async function* findJob(id: string): AsyncGenerator<unknown, unknown, und
   // Replay buffered events
   let index = 0;
   while (index < job.buffer.length) {
-    const entry = job.buffer[index++]!;
+    const entry = job.buffer[index++];
+    if (!entry) continue;
     if (entry.type === "event") yield entry.data;
     else if (entry.type === "return") return entry.data;
     else throw entry.data;
@@ -89,7 +90,8 @@ export async function* findJob(id: string): AsyncGenerator<unknown, unknown, und
   try {
     while (true) {
       if (queue.length > 0) {
-        const entry = queue.shift()!;
+        const entry = queue.shift();
+        if (!entry) continue;
         if (entry.type === "event") yield entry.data;
         else if (entry.type === "return") return entry.data;
         else throw entry.data;
