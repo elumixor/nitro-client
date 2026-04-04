@@ -12,9 +12,9 @@ type InferSchema<S extends SchemaInput> = S extends ZodType
 
 type Inferred<S extends Schemas> = { [K in keyof S]: S[K] extends SchemaInput ? InferSchema<S[K]> : never };
 
-export type BaseContext = {
+export type BaseContext<User = unknown> = {
   event: H3Event;
-  user: unknown;
+  user: User;
   router: Record<string, string>;
   signal: AbortSignal;
 };
@@ -32,57 +32,70 @@ function makeAbortSignal(event: H3Event): AbortSignal {
   return ac.signal;
 }
 
-export function handler<S extends Schemas, R>(
-  schemas: S,
-  fn: (context: Inferred<S> & BaseContext) => R,
-): EventHandler<EventHandlerRequest, R>;
-export function handler<R>(fn: (context: BaseContext) => R): EventHandler<EventHandlerRequest, R>;
-export function handler<S extends Schemas>(
-  schemasOrFn: S | ((context: BaseContext) => unknown),
-  fn?: (context: Inferred<S> & BaseContext) => unknown,
-) {
-  if (typeof schemasOrFn === "function") {
-    if (isGeneratorFn(schemasOrFn)) {
-      return defineEventHandler((event) => {
-        const gen = schemasOrFn({
+export function createHandler<User = unknown>() {
+  type Ctx = BaseContext<User>;
+
+  function handler<S extends Schemas, R>(
+    schemas: S,
+    fn: (context: Inferred<S> & Ctx) => R,
+  ): EventHandler<EventHandlerRequest, R>;
+  function handler<R>(fn: (context: Ctx) => R): EventHandler<EventHandlerRequest, R>;
+  function handler<S extends Schemas>(
+    schemasOrFn: S | ((context: Ctx) => unknown),
+    fn?: (context: Inferred<S> & Ctx) => unknown,
+  ) {
+    if (typeof schemasOrFn === "function") {
+      if (isGeneratorFn(schemasOrFn)) {
+        return defineEventHandler((event) => {
+          const gen = schemasOrFn({
+            event,
+            user: event.context.user,
+            router: routerProxy(event),
+            signal: makeAbortSignal(event),
+          } as Ctx) as AsyncGenerator<unknown>;
+          return sendSSEGenerator(event, gen);
+        });
+      }
+      return defineEventHandler(async (event) =>
+        schemasOrFn({
           event,
           user: event.context.user,
           router: routerProxy(event),
           signal: makeAbortSignal(event),
-        }) as AsyncGenerator<unknown>;
+        } as Ctx),
+      );
+    }
+
+    const { body, query } = schemasOrFn;
+
+    if (fn && isGeneratorFn(fn)) {
+      return defineEventHandler(async (event) => {
+        const context = {
+          event,
+          body: body ? await readValidatedBody(event, (data) => z.object(body).parse(data)) : undefined,
+          query: query ? await getValidatedQuery(event, (data) => z.object(query).parse(data)) : undefined,
+          router: routerProxy(event),
+          user: event.context.user,
+          signal: makeAbortSignal(event),
+        } as Inferred<S> & Ctx;
+        const gen = fn(context) as AsyncGenerator<unknown>;
         return sendSSEGenerator(event, gen);
       });
     }
+
     return defineEventHandler(async (event) =>
-      schemasOrFn({ event, user: event.context.user, router: routerProxy(event), signal: makeAbortSignal(event) }),
-    );
-  }
-
-  const { body, query } = schemasOrFn;
-
-  if (fn && isGeneratorFn(fn)) {
-    return defineEventHandler(async (event) => {
-      const context = {
+      (fn as (context: Inferred<S> & Ctx) => unknown)({
         event,
         body: body ? await readValidatedBody(event, (data) => z.object(body).parse(data)) : undefined,
         query: query ? await getValidatedQuery(event, (data) => z.object(query).parse(data)) : undefined,
         router: routerProxy(event),
         user: event.context.user,
         signal: makeAbortSignal(event),
-      } as Inferred<S> & BaseContext;
-      const gen = fn(context) as AsyncGenerator<unknown>;
-      return sendSSEGenerator(event, gen);
-    });
+      } as Inferred<S> & Ctx),
+    );
   }
 
-  return defineEventHandler(async (event) =>
-    (fn as (context: Inferred<S> & BaseContext) => unknown)({
-      event,
-      body: body ? await readValidatedBody(event, (data) => z.object(body).parse(data)) : undefined,
-      query: query ? await getValidatedQuery(event, (data) => z.object(query).parse(data)) : undefined,
-      router: routerProxy(event),
-      user: event.context.user,
-      signal: makeAbortSignal(event),
-    } as Inferred<S> & BaseContext),
-  );
+  return handler;
 }
+
+export const handler = createHandler();
