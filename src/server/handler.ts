@@ -47,9 +47,7 @@ function buildContext<E extends Record<string, (event: H3Event) => unknown>>(
   return base as BaseContext & ContextExtensions<E>;
 }
 
-export function createHandler<E extends Record<string, (event: H3Event) => unknown> = Record<string, never>>(
-  extensions?: E,
-) {
+export function createHandler<E extends Record<string, (event: H3Event) => unknown>>(extensions?: E) {
   type Ctx = BaseContext & ContextExtensions<E>;
   const ext = extensions ?? ({} as E);
 
