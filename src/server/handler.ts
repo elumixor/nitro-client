@@ -1,7 +1,7 @@
 import type { EventHandler, EventHandlerRequest, H3Event } from "h3";
 import { defineEventHandler, getRouterParam, getValidatedQuery, readValidatedBody } from "h3";
 import { type ZodType, z } from "zod";
-import { sendSSEGenerator } from "./sse.ts";
+import { sendSSEGenerator } from "./sse";
 
 type SchemaInput = Record<string, ZodType>;
 type Schemas = { body?: SchemaInput; query?: SchemaInput };

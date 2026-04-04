@@ -2,7 +2,7 @@
 import { resolve } from "node:path";
 import { readConfig } from "@elumixor/zod-config-cli";
 import { z } from "zod";
-import { generate } from "./generate.ts";
+import { generate } from "./generate";
 
 const schema = z.object({
   src: z.string().default("src"),
