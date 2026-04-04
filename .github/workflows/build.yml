@@ -9,7 +9,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
@@ -17,9 +16,7 @@ jobs:
       - run: bun run build
 
   test:
-    needs: build
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
@@ -27,9 +24,7 @@ jobs:
       - run: bun test
 
   lint:
-    needs: build
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
@@ -52,7 +47,7 @@ jobs:
 
       - name: Check if version has been updated
         id: check
-        uses: EndBug/version-check@v2
+        uses: EndBug/version-check@v3
 
       - run: bun install
         if: steps.check.outputs.changed == 'true'
