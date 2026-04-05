@@ -432,7 +432,9 @@ export interface NitroAPIOptions {
 
 export class Stream<E, R = void> {
   readonly done: Promise<R>;
-  jobId: string | undefined;
+  readonly id: Promise<string>;
+  private readonly _resolveId: (value: string) => void;
+  private readonly _rejectId: (err: Error) => void;
   private readonly _resolve: (value: R) => void;
   private readonly _reject: (err: Error) => void;
   private readonly _controller = new AbortController();
@@ -445,6 +447,10 @@ export class Stream<E, R = void> {
     this.done = promise;
     this._resolve = resolve;
     this._reject = reject;
+    const { promise: idPromise, resolve: resolveId, reject: rejectId } = Promise.withResolvers<string>();
+    this.id = idPromise;
+    this._resolveId = resolveId;
+    this._rejectId = rejectId;
     void this._start(baseUrl, path, method, body, customFetch);
   }
 
@@ -461,12 +467,15 @@ export class Stream<E, R = void> {
       });
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
-      if (err.name === "AbortError") { this._resolve(undefined as R); return; }
+      if (err.name === "AbortError") { this._resolve(undefined as R); this._rejectId(err); return; }
       this._reject(err);
+      this._rejectId(err);
       return;
     }
     if (!res.ok || !res.body) {
-      this._reject(new Error(\`API error \${res.status}: \${await res.text().catch(() => "")}\`));
+      const error = new Error(\`API error \${res.status}: \${await res.text().catch(() => "")}\`);
+      this._reject(error);
+      this._rejectId(error);
       return;
     }
     // If server returned JSON (not SSE), treat as immediate return value
@@ -476,6 +485,7 @@ export class Stream<E, R = void> {
       try { this._returnValue = JSON.parse(text) as R; } catch { this._returnValue = text as R; }
       this._resolve(this._returnValue as R);
       for (const w of this._waiters.splice(0)) w();
+      this.id.catch(() => {});
       return;
     }
     const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -499,12 +509,14 @@ export class Stream<E, R = void> {
             const msg = currentEvent === "__error"
               ? (data as { message: string }).message
               : (data as { __error: string }).__error;
-            this._reject(new Error(msg));
+            const error = new Error(msg);
+            this._reject(error);
+            this._rejectId(error);
             currentEvent = "";
             return;
           }
           if (currentEvent === "__job") {
-            this.jobId = (data as { id: string }).id;
+            this._resolveId((data as { id: string }).id);
             currentEvent = "";
             continue;
           }
@@ -520,12 +532,14 @@ export class Stream<E, R = void> {
       }
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
-      if (err.name !== "AbortError") { this._reject(err); return; }
+      if (err.name !== "AbortError") { this._reject(err); this._rejectId(err); return; }
     } finally {
       reader.cancel();
     }
     this._resolve(this._returnValue !== undefined ? this._returnValue : undefined as R);
     for (const w of this._waiters.splice(0)) w();
+    // Silence unhandled rejection if no job event was emitted
+    this.id.catch(() => {});
   }
 
   abort(): void { this._controller.abort(); }

@@ -8,10 +8,10 @@ type StreamYield<H> =
 type StreamReturn<H> =
   H extends EventHandler<EventHandlerRequest, AsyncGenerator<unknown, infer R, unknown>> ? R : never;
 
-const JOB_SENTINEL = Symbol("startJob");
+const JOB_SENTINEL = "__nitro_startJob__";
 
 export interface StartJobMarker {
-  [key: symbol]: true;
+  __nitro_startJob__: true;
   id: string;
 }
 
