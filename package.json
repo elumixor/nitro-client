@@ -1,6 +1,6 @@
 {
   "name": "@elumixor/nitro-client",
-  "version": "3.3.2",
+  "version": "3.3.3",
   "description": "Generate a typed API client from Nitro route handlers",
   "repository": {
     "type": "git",
