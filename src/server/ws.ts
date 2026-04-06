@@ -6,6 +6,8 @@ type SchemaInput = Record<string, ZodType>;
 type InferSchema<S extends SchemaInput> = { [K in keyof S]: S[K] extends ZodType ? z.infer<S[K]> : never };
 
 type WsSchemas = { send?: SchemaInput; receive?: SchemaInput };
+export type WsCleanup = () => void;
+type WsCallback<C> = ((context: C) => void) | ((context: C) => WsCleanup);
 
 export type WsContext<S extends WsSchemas = WsSchemas> = {
   send: (data: S["send"] extends SchemaInput ? InferSchema<S["send"]> : unknown) => void;
@@ -24,8 +26,6 @@ type ContextExtensions<E extends Record<string, (event: H3Event) => unknown>> = 
   [K in keyof E]: ReturnType<E[K]>;
 };
 
-type Cleanup = undefined | (() => void);
-
 const routerProxy = (event: H3Event | undefined) =>
   new Proxy({} as Record<string, string>, {
     get: (_, key: string) => (event ? getRouterParam(event, key) : undefined),
@@ -37,12 +37,12 @@ export function createWsHandler<E extends Record<string, (event: H3Event) => unk
 
   function wsHandler<S extends WsSchemas>(
     schemas: S,
-    fn: (context: WsContext<S> & ContextExtensions<E>) => Cleanup,
+    fn: WsCallback<WsContext<S> & ContextExtensions<E>>,
   ): EventHandler<EventHandlerRequest, never>;
-  function wsHandler(fn: (context: Ctx) => Cleanup): EventHandler<EventHandlerRequest, never>;
+  function wsHandler(fn: WsCallback<Ctx>): EventHandler<EventHandlerRequest, never>;
   function wsHandler<S extends WsSchemas>(
-    schemasOrFn: S | ((context: Ctx) => Cleanup),
-    fn?: (context: WsContext<S> & ContextExtensions<E>) => Cleanup,
+    schemasOrFn: S | WsCallback<Ctx>,
+    fn?: WsCallback<WsContext<S> & ContextExtensions<E>>,
   ) {
     const schemas = typeof schemasOrFn === "function" ? undefined : schemasOrFn;
     const callback = typeof schemasOrFn === "function" ? schemasOrFn : fn;

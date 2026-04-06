@@ -1,4 +1,5 @@
-import { handler, startJob, findJob } from "@elumixor/nitro-client/server";
+import { handler } from "../utils/handler";
+import { startJob, findJob } from "@elumixor/nitro-client/server";
 import { z } from "zod";
 
 export default handler(

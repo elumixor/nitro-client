@@ -565,6 +565,7 @@ export class Socket<ServerMsg, ClientMsg> {
   private readonly _buffer: ServerMsg[] = [];
   private readonly _waiters: Array<() => void> = [];
   private _done = false;
+  private _nextIndex = 0;
   private readonly _resolveConnected: () => void;
   private readonly _rejectConnected: (err: Error) => void;
   private readonly _resolveClosed: () => void;
@@ -610,6 +611,16 @@ export class Socket<ServerMsg, ClientMsg> {
     this._ws.close(code, reason);
   }
 
+  next(): Promise<ServerMsg | undefined> {
+    if (this._nextIndex < this._buffer.length) return Promise.resolve(this._buffer[this._nextIndex++]!);
+    if (this._done) return Promise.resolve(undefined);
+    return new Promise<ServerMsg | undefined>((resolve) => {
+      this._waiters.push(() => {
+        resolve(this._nextIndex < this._buffer.length ? this._buffer[this._nextIndex++]! : undefined);
+      });
+    });
+  }
+
   [Symbol.asyncIterator](): AsyncGenerator<ServerMsg> {
     const self = this;
     let index = 0;
@@ -631,9 +642,11 @@ export class Socket<ServerMsg, ClientMsg> {
 // AUTO-GENERATED. DO NOT EDIT.
 // Run 'bunx nitro-client' to regenerate.
 
+type FetchFn = (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => Promise<Response>;
+
 export interface NitroAPIOptions {
   baseUrl: string;
-  fetch?: typeof fetch;
+  fetch?: FetchFn;
 }
 ${socketClass}
 export class Stream<E, R = void> {
@@ -648,7 +661,7 @@ export class Stream<E, R = void> {
   private readonly _waiters: Array<() => void> = [];
   private _returnValue: R | undefined;
 
-  constructor(baseUrl: string, path: string, method: string, body: unknown, customFetch: typeof fetch) {
+  constructor(baseUrl: string, path: string, method: string, body: unknown, customFetch: FetchFn) {
     const { promise, resolve, reject } = Promise.withResolvers<R>();
     this.done = promise;
     this._resolve = resolve;
@@ -660,7 +673,7 @@ export class Stream<E, R = void> {
     void this._start(baseUrl, path, method, body, customFetch);
   }
 
-  private async _start(baseUrl: string, path: string, method: string, body: unknown, customFetch: typeof fetch): Promise<void> {
+  private async _start(baseUrl: string, path: string, method: string, body: unknown, customFetch: FetchFn): Promise<void> {
     const headers: Record<string, string> = { Accept: "text/event-stream" };
     if (body !== undefined && !(body instanceof FormData)) headers["Content-Type"] = "application/json";
     let res: Response;
@@ -775,7 +788,7 @@ function _buildRoutes(
 
 class _NitroAPIBase {
   readonly $baseUrl: string;
-  private readonly customFetch: typeof fetch;
+  private readonly customFetch: FetchFn;
 
   constructor(options: NitroAPIOptions) {
     this.$baseUrl = options.baseUrl;

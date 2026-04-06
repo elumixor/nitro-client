@@ -1,4 +1,4 @@
-import { handler } from "@elumixor/nitro-client/server";
+import { handler } from "../utils/handler";
 import { z } from "zod";
 
 export default handler({ body: { from: z.number() } }, async function* ({ body }) {

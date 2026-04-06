@@ -14,5 +14,6 @@
     "paths": {
       "@elumixor/nitro-client/server": ["../../dist/server/index.d.mts"]
     }
-  }
+  },
+  "exclude": ["generated/client"]
 }
