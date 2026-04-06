@@ -1,0 +1,20 @@
+{
+  "name": "backend",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./generated/client/index.ts"
+  },
+  "scripts": {
+    "dev": "nitro dev --port 3456",
+    "generate": "bunx nitro-client"
+  },
+  "dependencies": {
+    "h3": "^1.15.1",
+    "nitropack": "^2.11.12",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@elumixor/nitro-client": "file:../../"
+  }
+}

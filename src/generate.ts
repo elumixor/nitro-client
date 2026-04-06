@@ -11,11 +11,18 @@ interface RouteFile {
   alias: string;
 }
 
+interface WsRouteFile {
+  urlPath: string;
+  filePath: string;
+  alias: string;
+}
+
 interface TreeNode {
   methods: Map<
     Method,
     { alias: string; typeStr: string; body?: string; query?: string; streamType?: string; streamReturnType?: string }
   >;
+  ws?: { alias: string; sendType: string; receiveType: string };
   statics: Map<string, { origName: string; child: TreeNode }>;
   param: { name: string; child: TreeNode } | null;
 }
@@ -41,8 +48,9 @@ function* scanRoutes(
       const seg = name.replace(/\[([^\]]+)\]/g, ":$1");
       yield* scanRoutes(full, `${urlPrefix}/${seg}`, excludeDirs, excludeRoutes);
     } else {
-      const m = name.match(/^(.+)\.(get|post|patch|put|delete)\.ts$/);
+      const m = name.match(/^(.+)\.(get|post|patch|put|delete|ws)\.ts$/);
       if (!m) continue;
+      if (m[2] === "ws") continue; // WS routes handled by scanWsRoutes
       const [, base, methodStr] = m;
       const method = methodStr as Method;
       const suffix = base === "index" ? "" : `/${(base ?? "").replace(/\[([^\]]+)\]/g, ":$1")}`;
@@ -57,6 +65,37 @@ function* scanRoutes(
         method;
       if (excludeRoutes.has(urlPath)) continue;
       yield { method, urlPath, filePath: full, alias };
+    }
+  }
+}
+
+function* scanWsRoutes(
+  dir: string,
+  urlPrefix = "",
+  excludeDirs: Set<string>,
+  excludeRoutes: Set<string>,
+): Generator<WsRouteFile> {
+  for (const name of readdirSync(dir).sort()) {
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) {
+      if (excludeDirs.has(name)) continue;
+      const seg = name.replace(/\[([^\]]+)\]/g, ":$1");
+      yield* scanWsRoutes(full, `${urlPrefix}/${seg}`, excludeDirs, excludeRoutes);
+    } else {
+      const m = name.match(/^(.+)\.ws\.ts$/);
+      if (!m) continue;
+      const [, base] = m;
+      const suffix = base === "index" ? "" : `/${(base ?? "").replace(/\[([^\]]+)\]/g, ":$1")}`;
+      const urlPath = `${urlPrefix}${suffix}` || "/";
+      const alias =
+        "W" +
+        urlPath
+          .replace(/:([^/]+)/g, "_$1")
+          .replace(/\//g, "_")
+          .replace(/-/g, "_") +
+        "_ws";
+      if (excludeRoutes.has(urlPath)) continue;
+      yield { urlPath, filePath: full, alias };
     }
   }
 }
@@ -147,6 +186,8 @@ function buildTree(
   typeMap: Map<string, string>,
   requestMap: Map<string, { body?: string; query?: string }>,
   streamMap: Map<string, { yield: string; return?: string }>,
+  wsRoutes: WsRouteFile[],
+  wsTypeMap: Map<string, { send: string; receive: string }>,
 ): TreeNode {
   const root = makeNode();
   for (const route of routes) {
@@ -175,6 +216,27 @@ function buildTree(
       streamType: stream?.yield,
       streamReturnType: stream?.return,
     });
+  }
+  for (const wsRoute of wsRoutes) {
+    const types = wsTypeMap.get(wsRoute.alias);
+    const sendType = types?.send ?? "unknown";
+    const receiveType = types?.receive ?? "unknown";
+    let node = root;
+    const segments = wsRoute.urlPath === "/" ? [] : wsRoute.urlPath.split("/").filter(Boolean);
+    for (const seg of segments) {
+      if (seg.startsWith(":")) {
+        const paramName = seg.slice(1);
+        if (!node.param) node.param = { name: paramName, child: makeNode() };
+        node = node.param.child;
+      } else {
+        const camelName = toCamel(seg);
+        if (!node.statics.has(camelName)) node.statics.set(camelName, { origName: seg, child: makeNode() });
+        const staticNode = node.statics.get(camelName);
+        if (!staticNode) throw new Error(`Missing static route node for segment ${seg}`);
+        node = staticNode.child;
+      }
+    }
+    node.ws = { alias: wsRoute.alias, sendType, receiveType };
   }
   return root;
 }
@@ -208,6 +270,16 @@ function genNode(node: TreeNode, urlExpr: string): string {
       if (requestParts.length > 0) phantom.push(`$request: { ${requestParts.join("; ")} }`);
       parts.push(`$${method}: (${fn}) as unknown as (${fnType}) & { ${phantom.join("; ")} }`);
     }
+  }
+
+  if (node.ws) {
+    const { sendType, receiveType } = node.ws;
+    // Nitro serves WS handlers at path.ws — append .ws to the URL
+    const wsUrl = `${urlExpr}.ws`;
+    const fn = `() => doSocket<${sendType}, ${receiveType}>(\`${wsUrl}\`)`;
+    const fnType = `() => Socket<${sendType}, ${receiveType}>`;
+    const phantom = `$send: ${sendType}; $receive: ${receiveType}`;
+    parts.push(`$ws: (${fn}) as unknown as (${fnType}) & { ${phantom} }`);
   }
 
   for (const [camelName, { origName, child }] of node.statics)
@@ -298,7 +370,8 @@ export function generate(options: GenerateOptions) {
   const excludeRoutes = options.excludeRoutes ?? new Set<string>();
 
   const routes = [...scanRoutes(routesDir, "", excludeDirs, excludeRoutes)];
-  console.log(`Found ${routes.length} routes`);
+  const wsRoutes = [...scanWsRoutes(routesDir, "", excludeDirs, excludeRoutes)];
+  console.log(`Found ${routes.length} routes, ${wsRoutes.length} WebSocket routes`);
 
   const project = new Project({
     tsConfigFilePath,
@@ -306,6 +379,7 @@ export function generate(options: GenerateOptions) {
   });
 
   for (const route of routes) project.addSourceFileAtPath(route.filePath);
+  for (const route of wsRoutes) project.addSourceFileAtPath(route.filePath);
   project.resolveSourceFileDependencies();
 
   const checker = project.getTypeChecker().compilerObject;
@@ -418,8 +492,140 @@ export function generate(options: GenerateOptions) {
     }
   }
 
-  const tree = buildTree(routes, typeMap, requestMap, streamMap);
+  // Extract WebSocket send/receive types
+  const wsTypeMap = new Map<string, { send: string; receive: string }>();
+  for (const wsRoute of wsRoutes) {
+    try {
+      const sf = project.getSourceFileOrThrow(wsRoute.filePath);
+      const defaultExports = sf.getExportedDeclarations().get("default");
+      if (!defaultExports?.length) continue;
+      const firstExport = defaultExports[0];
+      if (!firstExport) continue;
+      const declNode = firstExport.compilerNode;
+
+      // wsHandler(schemas, fn) or wsHandler(fn) — extract inferred types from schema properties
+      if (declNode.kind === ts.SyntaxKind.CallExpression) {
+        const call = declNode as ts.CallExpression;
+        if (call.arguments.length >= 2) {
+          // First arg is the schemas object { send: {...}, receive: {...} }
+          const schemasArg = call.arguments[0];
+          if (schemasArg) {
+            const schemasType = checker.getTypeAtLocation(schemasArg);
+
+            // For each schema group (send/receive), resolve Zod output types from { key: ZodType }
+            const resolveZodSchemaGroup = (propName: string): string => {
+              const prop = schemasType.getProperty(propName);
+              if (!prop) return "unknown";
+              const objType = checker.getTypeOfSymbol(prop);
+              const props = checker.getPropertiesOfType(objType);
+              if (props.length === 0) return "Record<string, unknown>";
+              const parts: string[] = [];
+              for (const p of props) {
+                const name = p.getName();
+                if (name.startsWith("_")) continue;
+                const zodType = checker.getTypeOfSymbol(p);
+                // Zod v4: T["_zod"]["output"] gives the inferred output type
+                const zodProp = zodType.getProperty("_zod");
+                if (zodProp) {
+                  const zodInternals = checker.getTypeOfSymbol(zodProp);
+                  const outputProp = zodInternals.getProperty("output");
+                  if (outputProp) {
+                    parts.push(`${name}: ${serializeRawType(checker.getTypeOfSymbol(outputProp), checker)}`);
+                    continue;
+                  }
+                }
+                parts.push(`${name}: unknown`);
+              }
+              return `{ ${parts.join("; ")} }`;
+            };
+
+            const sendType = resolveZodSchemaGroup("send");
+            const receiveType = resolveZodSchemaGroup("receive");
+            wsTypeMap.set(wsRoute.alias, { send: sendType, receive: receiveType });
+            console.log(`  ${wsRoute.alias} (ws): send=${sendType.slice(0, 50)}, receive=${receiveType.slice(0, 50)}`);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(`  Warning: could not resolve WS types for ${wsRoute.alias}: ${(e as Error).message}`);
+    }
+  }
+
+  const tree = buildTree(routes, typeMap, requestMap, streamMap, wsRoutes, wsTypeMap);
   const clientBody = genNode(tree, "");
+  const hasWsRoutes = wsRoutes.length > 0;
+
+  const socketClass = !hasWsRoutes
+    ? ""
+    : `
+export class Socket<ServerMsg, ClientMsg> {
+  readonly connected: Promise<void>;
+  readonly closed: Promise<void>;
+  private readonly _ws: WebSocket;
+  private readonly _buffer: ServerMsg[] = [];
+  private readonly _waiters: Array<() => void> = [];
+  private _done = false;
+  private readonly _resolveConnected: () => void;
+  private readonly _rejectConnected: (err: Error) => void;
+  private readonly _resolveClosed: () => void;
+
+  constructor(baseUrl: string, path: string) {
+    let wsUrl: string;
+    if (baseUrl) {
+      wsUrl = baseUrl.replace(/^http/, "ws") + path;
+    } else if (typeof window !== "undefined") {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      wsUrl = proto + "//" + window.location.host + path;
+    } else {
+      wsUrl = "ws://localhost" + path;
+    }
+    this._ws = new WebSocket(wsUrl);
+    const { promise: connected, resolve: resolveConnected, reject: rejectConnected } = Promise.withResolvers<void>();
+    this.connected = connected;
+    this._resolveConnected = resolveConnected;
+    this._rejectConnected = rejectConnected;
+    const { promise: closed, resolve: resolveClosed } = Promise.withResolvers<void>();
+    this.closed = closed;
+    this._resolveClosed = resolveClosed;
+    this._ws.onopen = () => this._resolveConnected();
+    this._ws.onerror = (e) => this._rejectConnected(new Error("WebSocket error"));
+    this._ws.onmessage = (e) => {
+      let data: unknown;
+      try { data = JSON.parse(e.data as string); } catch { data = e.data; }
+      this._buffer.push(data as ServerMsg);
+      for (const w of this._waiters.splice(0)) w();
+    };
+    this._ws.onclose = () => {
+      this._done = true;
+      this._resolveClosed();
+      for (const w of this._waiters.splice(0)) w();
+    };
+  }
+
+  send(data: ClientMsg): void {
+    this._ws.send(JSON.stringify(data));
+  }
+
+  close(code?: number, reason?: string): void {
+    this._ws.close(code, reason);
+  }
+
+  [Symbol.asyncIterator](): AsyncGenerator<ServerMsg> {
+    const self = this;
+    let index = 0;
+    return (async function* () {
+      while (true) {
+        if (index < self._buffer.length) { yield self._buffer[index++]!; continue; }
+        if (self._done) return;
+        await new Promise<void>((resolve) => {
+          self._waiters.push(resolve);
+        });
+        if (index >= self._buffer.length && self._done) return;
+      }
+    })();
+  }
+}
+`;
 
   const output = `\
 // AUTO-GENERATED. DO NOT EDIT.
@@ -429,7 +635,7 @@ export interface NitroAPIOptions {
   baseUrl: string;
   fetch?: typeof fetch;
 }
-
+${socketClass}
 export class Stream<E, R = void> {
   readonly done: Promise<R>;
   readonly id: Promise<string>;
@@ -562,7 +768,7 @@ export class Stream<E, R = void> {
 
 function _buildRoutes(
   doFetch: <T>(path: string, method: string, body?: unknown) => Promise<T>,
-  doStream: <E, R = void>(path: string, method: string, body?: unknown) => Stream<E, R>,
+  doStream: <E, R = void>(path: string, method: string, body?: unknown) => Stream<E, R>,${hasWsRoutes ? "\n  doSocket: <S, R>(path: string) => Socket<S, R>," : ""}
 ) {
   return ${clientBody};
 }
@@ -573,14 +779,22 @@ class _NitroAPIBase {
 
   constructor(options: NitroAPIOptions) {
     this.$baseUrl = options.baseUrl;
-    this.customFetch = options.fetch ?? fetch;
-    Object.assign(this, _buildRoutes(this.doFetch.bind(this), this.doStream.bind(this)));
+    this.customFetch = options.fetch ?? fetch.bind(globalThis);
+    Object.assign(this, _buildRoutes(this.doFetch.bind(this), this.doStream.bind(this)${hasWsRoutes ? ", this.doSocket.bind(this)" : ""}));
   }
 
   doStream<E, R = void>(path: string, method: string, body?: unknown): Stream<E, R> {
     return new Stream<E, R>(this.$baseUrl, path, method, body, this.customFetch);
   }
-
+${
+  hasWsRoutes
+    ? `
+  doSocket<S, R>(path: string): Socket<S, R> {
+    return new Socket<S, R>(this.$baseUrl, path);
+  }
+`
+    : ""
+}
   private async doFetch<T>(path: string, method: string, body?: unknown): Promise<T> {
     const headers: Record<string, string> = {};
     if (body !== undefined && !(body instanceof FormData)) headers["Content-Type"] = "application/json";

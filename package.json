@@ -27,6 +27,7 @@
     "build": "unbuild",
     "lint": "tsc --noEmit && biome check src",
     "test": "npm run build && npm run lint",
+    "test:e2e": "npm run build && cd example/backend && bunx nitro-client && cd ../.. && cd example && npx playwright test",
     "format": "biome format --write src",
     "release:patch": "npm version patch -m \"Release v%s\" && git push --tags",
     "release:minor": "npm version minor -m \"Release v%s\" && git push --tags",

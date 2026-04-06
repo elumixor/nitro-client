@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nitro-client · example</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,200;0,9..144,400;1,9..144,200;1,9..144,400&family=Fira+Code:wght@300;400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* ─── Tokens ─────────────────────────────────────────────── */
+      :root {
+        --bg:           #070910;
+        --surface:      #0b0e18;
+        --surface-2:    #10141f;
+        --border:       #181d2e;
+        --border-hi:    #252d47;
+        --text:         #9aa3be;
+        --text-dim:     #2e374f;
+        --text-bright:  #dce3f5;
+
+        --get:  #3de89a;
+        --post: #5ba8ff;
+        --sse:  #ffb347;
+        --ws:   #c084fc;
+        --accent: #2dd4bf;
+
+        --r: 7px;
+        --mono: "Fira Code", "Cascadia Code", "Consolas", monospace;
+        --serif: "Fraunces", Georgia, serif;
+      }
+
+      /* ─── Reset ──────────────────────────────────────────────── */
+      *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+      html, body {
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 13px;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* ─── Background grid ────────────────────────────────────── */
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background-image:
+          linear-gradient(var(--border) 1px, transparent 1px),
+          linear-gradient(90deg, var(--border) 1px, transparent 1px);
+        background-size: 36px 36px;
+        opacity: 0.55;
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      /* ─── Ambient glow ───────────────────────────────────────── */
+      body::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background:
+          radial-gradient(ellipse 70% 40% at 50% -10%, rgba(45,212,191,0.055) 0%, transparent 100%),
+          radial-gradient(ellipse 50% 50% at 100% 100%, rgba(91,168,255,0.03) 0%, transparent 100%);
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      /* ─── Layout ─────────────────────────────────────────────── */
+      #app {
+        position: relative;
+        z-index: 1;
+        max-width: 880px;
+        margin: 0 auto;
+        padding: 52px 28px 48px;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        gap: 28px;
+      }
+
+      /* ─── Header ─────────────────────────────────────────────── */
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding-bottom: 28px;
+        border-bottom: 1px solid var(--border);
+        animation: fadeDown 0.6s cubic-bezier(0.16,1,0.3,1) backwards;
+      }
+
+      .logo-area {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .logo-hex {
+        width: 38px;
+        height: 38px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+      }
+
+      .logo-hex svg {
+        filter: drop-shadow(0 0 10px rgba(45,212,191,0.55));
+      }
+
+      .wordmark h1 {
+        font-family: var(--serif);
+        font-style: italic;
+        font-weight: 200;
+        font-size: 26px;
+        color: var(--text-bright);
+        letter-spacing: -0.3px;
+        line-height: 1;
+      }
+
+      .wordmark p {
+        font-size: 10.5px;
+        color: var(--text-dim);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        margin-top: 5px;
+        font-weight: 300;
+      }
+
+      .header-right {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+      }
+
+      .version-badge {
+        font-size: 10.5px;
+        color: var(--text-dim);
+        border: 1px solid var(--border-hi);
+        padding: 3px 9px;
+        border-radius: 20px;
+        letter-spacing: 0.05em;
+      }
+
+      .status-pill {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 10.5px;
+        color: var(--text-dim);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--get);
+        box-shadow: 0 0 7px var(--get);
+        animation: blink 2.4s ease-in-out infinite;
+      }
+
+      /* ─── Section label ──────────────────────────────────────── */
+      .section-label {
+        font-size: 10px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .section-label::after {
+        content: "";
+        flex: 1;
+        height: 1px;
+        background: var(--border);
+      }
+
+      /* ─── Command buttons ────────────────────────────────────── */
+      .commands {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 10px;
+      }
+
+      @media (max-width: 680px) {
+        .commands { grid-template-columns: repeat(2, 1fr); }
+        .commands .cmd-btn:last-child { grid-column: 1 / -1; }
+      }
+
+      .cmd-btn {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 9px;
+        padding: 15px 13px 14px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--r);
+        cursor: pointer;
+        text-align: left;
+        font-family: var(--mono);
+        position: relative;
+        overflow: hidden;
+        transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s, background 0.18s;
+        animation: slideUp 0.5s cubic-bezier(0.16,1,0.3,1) backwards;
+      }
+
+      .cmd-btn:nth-child(1) { animation-delay: 0.06s; }
+      .cmd-btn:nth-child(2) { animation-delay: 0.1s; }
+      .cmd-btn:nth-child(3) { animation-delay: 0.14s; }
+      .cmd-btn:nth-child(4) { animation-delay: 0.18s; }
+      .cmd-btn:nth-child(5) { animation-delay: 0.22s; }
+
+      /* left accent bar */
+      .cmd-btn::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 12%;
+        bottom: 12%;
+        width: 2px;
+        border-radius: 0 2px 2px 0;
+        transform: scaleY(0);
+        transform-origin: center;
+        transition: transform 0.22s cubic-bezier(0.34,1.56,0.64,1);
+      }
+
+      .cmd-btn[data-method="GET"]::before  { background: var(--get); }
+      .cmd-btn[data-method="POST"]::before { background: var(--post); }
+      .cmd-btn[data-method="SSE"]::before  { background: var(--sse); }
+      .cmd-btn[data-method="WS"]::before   { background: var(--ws); }
+
+      .cmd-btn:hover { transform: translateY(-2px); }
+      .cmd-btn:hover::before { transform: scaleY(1); }
+      .cmd-btn:active { transform: translateY(0); }
+
+      .cmd-btn[data-method="GET"]:hover  { border-color: rgba(61,232,154,0.28);  box-shadow: 0 6px 24px rgba(0,0,0,0.5), 0 0 0 0 rgba(61,232,154,0.1); background: rgba(61,232,154,0.025); }
+      .cmd-btn[data-method="POST"]:hover { border-color: rgba(91,168,255,0.28);  box-shadow: 0 6px 24px rgba(0,0,0,0.5); background: rgba(91,168,255,0.025); }
+      .cmd-btn[data-method="SSE"]:hover  { border-color: rgba(255,179,71,0.28);  box-shadow: 0 6px 24px rgba(0,0,0,0.5); background: rgba(255,179,71,0.025); }
+      .cmd-btn[data-method="WS"]:hover   { border-color: rgba(192,132,252,0.28); box-shadow: 0 6px 24px rgba(0,0,0,0.5); background: rgba(192,132,252,0.025); }
+
+      .method-badge {
+        font-size: 9.5px;
+        font-weight: 500;
+        letter-spacing: 0.14em;
+        padding: 2px 7px;
+        border-radius: 3px;
+        font-family: var(--mono);
+        line-height: 1.6;
+      }
+
+      .method-badge.get  { color: var(--get);  background: rgba(61,232,154,0.1);  border: 1px solid rgba(61,232,154,0.2); }
+      .method-badge.post { color: var(--post); background: rgba(91,168,255,0.1);  border: 1px solid rgba(91,168,255,0.2); }
+      .method-badge.sse  { color: var(--sse);  background: rgba(255,179,71,0.1);  border: 1px solid rgba(255,179,71,0.2); }
+      .method-badge.ws   { color: var(--ws);   background: rgba(192,132,252,0.1); border: 1px solid rgba(192,132,252,0.2); }
+
+      .cmd-path {
+        font-size: 12.5px;
+        color: var(--text-bright);
+        font-weight: 500;
+        letter-spacing: 0.01em;
+        line-height: 1;
+      }
+
+      .cmd-desc {
+        font-size: 10.5px;
+        color: var(--text-dim);
+        font-weight: 300;
+        line-height: 1;
+      }
+
+      /* ─── Terminal window ────────────────────────────────────── */
+      .terminal {
+        flex: 1;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--r);
+        display: flex;
+        flex-direction: column;
+        min-height: 280px;
+        overflow: hidden;
+        animation: fadeUp 0.6s cubic-bezier(0.16,1,0.3,1) 0.3s backwards;
+      }
+
+      .term-chrome {
+        display: flex;
+        align-items: center;
+        padding: 10px 14px;
+        background: var(--surface-2);
+        border-bottom: 1px solid var(--border);
+        gap: 10px;
+        flex-shrink: 0;
+      }
+
+      .macos-dots {
+        display: flex;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+
+      .macos-dots span {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+
+      .macos-dots span:nth-child(1) { background: #ff5f57; }
+      .macos-dots span:nth-child(2) { background: #febc2e; }
+      .macos-dots span:nth-child(3) { background: #28c840; }
+
+      .term-title {
+        flex: 1;
+        text-align: center;
+        font-size: 10.5px;
+        color: var(--text-dim);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .btn-clear {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--text-dim);
+        background: none;
+        border: 1px solid var(--border-hi);
+        border-radius: 4px;
+        padding: 3px 9px;
+        cursor: pointer;
+        letter-spacing: 0.05em;
+        transition: color 0.14s, border-color 0.14s;
+        flex-shrink: 0;
+      }
+
+      .btn-clear:hover {
+        color: var(--text);
+        border-color: var(--text-dim);
+      }
+
+      #log {
+        flex: 1;
+        padding: 18px 20px 18px;
+        font-family: var(--mono);
+        font-size: 12.5px;
+        line-height: 1.75;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+        color: var(--text);
+        scrollbar-width: thin;
+        scrollbar-color: var(--border-hi) transparent;
+      }
+
+      #log::-webkit-scrollbar { width: 5px; }
+      #log::-webkit-scrollbar-track { background: transparent; }
+      #log::-webkit-scrollbar-thumb { background: var(--border-hi); border-radius: 3px; }
+
+      /* ─── Log line types ─────────────────────────────────────── */
+      .log-line {
+        display: block;
+        animation: logIn 0.18s ease backwards;
+      }
+
+      .log-spacer {
+        display: block;
+        height: 0.5em;
+      }
+
+      .log-hint {
+        color: var(--text-dim);
+        font-style: italic;
+      }
+
+      .log-line.header       { color: var(--text-dim); }
+      .log-line.header.get   { color: var(--get); }
+      .log-line.header.post  { color: var(--post); }
+      .log-line.header.sse   { color: var(--sse); }
+      .log-line.header.ws    { color: var(--ws); }
+      .log-line.data         { color: var(--text); }
+      .log-line.meta         { color: #5a6a92; }
+      .log-line.result       { color: var(--accent); }
+      .log-line.status       { color: var(--accent); }
+      .log-line.err          { color: #f87171; }
+
+      /* ─── Footer ─────────────────────────────────────────────── */
+      footer {
+        border-top: 1px solid var(--border);
+        padding-top: 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        animation: fadeUp 0.6s cubic-bezier(0.16,1,0.3,1) 0.35s backwards;
+      }
+
+      footer p {
+        font-size: 10.5px;
+        color: var(--text-dim);
+        letter-spacing: 0.06em;
+      }
+
+      footer a {
+        color: var(--text-dim);
+        text-decoration: none;
+        transition: color 0.14s;
+      }
+
+      footer a:hover { color: var(--text); }
+
+      .footer-links {
+        display: flex;
+        gap: 16px;
+      }
+
+      /* ─── Animations ─────────────────────────────────────────── */
+      @keyframes fadeDown {
+        from { opacity: 0; transform: translateY(-10px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+
+      @keyframes slideUp {
+        from { opacity: 0; transform: translateY(14px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+
+      @keyframes fadeUp {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+
+      @keyframes logIn {
+        from { opacity: 0; transform: translateX(-6px); }
+        to   { opacity: 1; transform: translateX(0); }
+      }
+
+      @keyframes blink {
+        0%, 100% { opacity: 1; }
+        50%       { opacity: 0.35; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+
+      <!-- Header -->
+      <header>
+        <div class="logo-area">
+          <div class="logo-hex" aria-hidden="true">
+            <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+              <path d="M18 3 L32 11 L32 25 L18 33 L4 25 L4 11 Z"
+                    stroke="#2dd4bf" stroke-width="1.5" fill="rgba(45,212,191,0.07)"/>
+              <path d="M18 10 L24 14 L24 22 L18 26 L12 22 L12 14 Z"
+                    fill="rgba(45,212,191,0.15)" stroke="#2dd4bf" stroke-width="1"/>
+            </svg>
+          </div>
+          <div class="wordmark">
+            <h1>nitro-client</h1>
+            <p>Type-safe API client &middot; example</p>
+          </div>
+        </div>
+        <div class="header-right">
+          <span class="version-badge">v3.3.3</span>
+          <div class="status-pill">
+            <span class="dot"></span>
+            ready
+          </div>
+        </div>
+      </header>
+
+      <!-- Commands -->
+      <div>
+        <div class="section-label" style="margin-bottom: 12px;">Commands</div>
+        <div class="commands">
+          <button id="btn-hello"     class="cmd-btn" data-method="GET">
+            <span class="method-badge get">GET</span>
+            <span class="cmd-path">/hello</span>
+            <span class="cmd-desc">Simple request</span>
+          </button>
+          <button id="btn-greet"     class="cmd-btn" data-method="POST">
+            <span class="method-badge post">POST</span>
+            <span class="cmd-path">/greet</span>
+            <span class="cmd-desc">JSON body</span>
+          </button>
+          <button id="btn-countdown" class="cmd-btn" data-method="SSE">
+            <span class="method-badge sse">SSE</span>
+            <span class="cmd-path">/countdown</span>
+            <span class="cmd-desc">Streaming events</span>
+          </button>
+          <button id="btn-process"   class="cmd-btn" data-method="SSE">
+            <span class="method-badge sse">SSE</span>
+            <span class="cmd-path">/process</span>
+            <span class="cmd-desc">Background jobs</span>
+          </button>
+          <button id="btn-chat"      class="cmd-btn" data-method="WS">
+            <span class="method-badge ws">WS</span>
+            <span class="cmd-path">/chat</span>
+            <span class="cmd-desc">Real-time socket</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Terminal -->
+      <div>
+        <div class="section-label" style="margin-bottom: 12px;">Output</div>
+        <div class="terminal">
+          <div class="term-chrome">
+            <div class="macos-dots" aria-hidden="true">
+              <span></span><span></span><span></span>
+            </div>
+            <span class="term-title">nitro-client · console</span>
+            <button class="btn-clear" id="btn-clear">clear</button>
+          </div>
+          <pre id="log"><span class="log-hint">↑ Click a command to see output</span></pre>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <footer>
+        <p>nitro-client &copy; 2025</p>
+        <div class="footer-links">
+          <a href="https://github.com/elumixor/nitro-client" target="_blank">github</a>
+          <a href="#" id="btn-clear-footer">clear log</a>
+        </div>
+      </footer>
+
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
