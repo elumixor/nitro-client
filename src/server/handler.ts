@@ -63,10 +63,7 @@ export function createHandler<E extends Record<string, (event: H3Event) => unkno
   type Ctx = BaseContext & ContextExtensions<E>;
   const ext = extensions ?? ({} as E);
 
-  function handler<S extends Schemas, R>(
-    schemas: S,
-    fn: (context: Inferred<S> & Ctx) => R,
-  ): ExecutableEventHandler<R>;
+  function handler<S extends Schemas, R>(schemas: S, fn: (context: Inferred<S> & Ctx) => R): ExecutableEventHandler<R>;
   function handler<R>(fn: (context: Ctx) => R): ExecutableEventHandler<R>;
   function handler<S extends Schemas>(
     schemasOrFn: S | ((context: Ctx) => unknown),
@@ -79,7 +76,9 @@ export function createHandler<E extends Record<string, (event: H3Event) => unkno
           return sendSSEGenerator(event, gen);
         });
       }
-      const eh = defineEventHandler((event) => schemasOrFn(buildContext(event, ext) as Ctx)) as ExecutableEventHandler<unknown>;
+      const eh = defineEventHandler((event) =>
+        schemasOrFn(buildContext(event, ext) as Ctx),
+      ) as ExecutableEventHandler<unknown>;
       eh.execute = async (event) => schemasOrFn(buildContext(event, ext) as Ctx) as Awaited<unknown>;
       return eh;
     }
@@ -111,8 +110,7 @@ export function createHandler<E extends Record<string, (event: H3Event) => unkno
       return callFn(event, parsedBody, parsedQuery);
     }) as ExecutableEventHandler<unknown>;
 
-    eh.execute = async (event, parsedBody, parsedQuery) =>
-      callFn(event, parsedBody, parsedQuery) as Awaited<unknown>;
+    eh.execute = async (event, parsedBody, parsedQuery) => callFn(event, parsedBody, parsedQuery) as Awaited<unknown>;
 
     return eh;
   }
