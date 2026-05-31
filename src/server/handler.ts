@@ -49,6 +49,16 @@ function buildContext<E extends Record<string, (event: H3Event) => unknown>>(
   return base as BaseContext & ContextExtensions<E>;
 }
 
+/**
+ * In-process direct invocation: skips HTTP body parsing and middleware. Pass pre-parsed
+ * `body` / `query` and a (possibly synthetic) event whose `event.context` is already populated.
+ * Used by `@elumixor/nitro-bot` to invoke tool routes as plain typed function calls. Not attached
+ * to generator handlers (their result is an SSE stream).
+ */
+export type ExecutableEventHandler<R> = EventHandler<EventHandlerRequest, R> & {
+  execute: (event: H3Event, body?: unknown, query?: unknown) => Promise<Awaited<R>>;
+};
+
 export function createHandler<E extends Record<string, (event: H3Event) => unknown>>(extensions?: E) {
   type Ctx = BaseContext & ContextExtensions<E>;
   const ext = extensions ?? ({} as E);
@@ -56,8 +66,8 @@ export function createHandler<E extends Record<string, (event: H3Event) => unkno
   function handler<S extends Schemas, R>(
     schemas: S,
     fn: (context: Inferred<S> & Ctx) => R,
-  ): EventHandler<EventHandlerRequest, R>;
-  function handler<R>(fn: (context: Ctx) => R): EventHandler<EventHandlerRequest, R>;
+  ): ExecutableEventHandler<R>;
+  function handler<R>(fn: (context: Ctx) => R): ExecutableEventHandler<R>;
   function handler<S extends Schemas>(
     schemasOrFn: S | ((context: Ctx) => unknown),
     fn?: (context: Inferred<S> & Ctx) => unknown,
@@ -69,9 +79,9 @@ export function createHandler<E extends Record<string, (event: H3Event) => unkno
           return sendSSEGenerator(event, gen);
         });
       }
-      return defineEventHandler((event) => {
-        return schemasOrFn(buildContext(event, ext) as Ctx);
-      });
+      const eh = defineEventHandler((event) => schemasOrFn(buildContext(event, ext) as Ctx)) as ExecutableEventHandler<unknown>;
+      eh.execute = async (event) => schemasOrFn(buildContext(event, ext) as Ctx) as Awaited<unknown>;
+      return eh;
     }
 
     const { body, query } = schemasOrFn;
@@ -88,13 +98,23 @@ export function createHandler<E extends Record<string, (event: H3Event) => unkno
       });
     }
 
-    return defineEventHandler(async (event) => {
-      return (fn as (context: Inferred<S> & Ctx) => unknown)({
+    const callFn = (event: H3Event, parsedBody: unknown, parsedQuery: unknown) =>
+      (fn as (context: Inferred<S> & Ctx) => unknown)({
         ...buildContext(event, ext),
-        body: body ? await readValidatedBody(event, (data) => z.object(body).parse(data)) : undefined,
-        query: query ? await getValidatedQuery(event, (data) => z.object(query).parse(data)) : undefined,
+        body: parsedBody,
+        query: parsedQuery,
       } as Inferred<S> & Ctx);
-    });
+
+    const eh = defineEventHandler(async (event) => {
+      const parsedBody = body ? await readValidatedBody(event, (data) => z.object(body).parse(data)) : undefined;
+      const parsedQuery = query ? await getValidatedQuery(event, (data) => z.object(query).parse(data)) : undefined;
+      return callFn(event, parsedBody, parsedQuery);
+    }) as ExecutableEventHandler<unknown>;
+
+    eh.execute = async (event, parsedBody, parsedQuery) =>
+      callFn(event, parsedBody, parsedQuery) as Awaited<unknown>;
+
+    return eh;
   }
 
   return handler;
