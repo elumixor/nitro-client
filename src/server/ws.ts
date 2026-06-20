@@ -16,6 +16,9 @@ export type WsContext<S extends WsSchemas = WsSchemas> = {
   close: (code?: number, reason?: string) => void;
   /** The raw h3 event from the upgrade request (may be undefined depending on adapter) */
   event: H3Event | undefined;
+  /** The upgrade request URL pathname. Works even when `event` is undefined (e.g. the Bun adapter),
+   *  so dynamic route params can be parsed from it when `router` can't resolve them. */
+  url: string;
   /** Lazy router param proxy */
   router: Record<string, string>;
   /** The crossws Peer id */
@@ -55,8 +58,15 @@ export function createWsHandler<E extends Record<string, (event: H3Event) => unk
 
     return defineWebSocketHandler({
       open(peer) {
-        const peerAny = peer as unknown as { ctx?: { event?: H3Event } };
+        const peerAny = peer as unknown as { ctx?: { event?: H3Event }; request?: { url?: string } };
         const event = peerAny.ctx?.event;
+        const rawUrl = peerAny.request?.url ?? event?.path ?? "";
+        let url = rawUrl;
+        try {
+          url = new URL(rawUrl, "http://localhost").pathname;
+        } catch {
+          // keep the raw value if it isn't a parseable URL
+        }
         const listeners: Array<(data: unknown) => void> = [];
         const state = { listeners, cleanup: undefined as (() => void) | undefined };
         peerState.set(peer.id, state);
@@ -66,6 +76,7 @@ export function createWsHandler<E extends Record<string, (event: H3Event) => unk
           receive: (cb) => listeners.push(cb),
           close: (code, reason) => peer.close(code, reason),
           event,
+          url,
           router: routerProxy(event),
           peerId: peer.id,
         };
