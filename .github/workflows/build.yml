@@ -45,18 +45,10 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Check if version has been updated
-        id: check
-        uses: EndBug/version-check@v3
-
+      # A pushed v-tag is an explicit release signal, so publish unconditionally. (The previous
+      # version-check gate reported no change on a shallow tag checkout and silently skipped.)
       - run: bun install
-        if: steps.check.outputs.changed == 'true'
 
       - run: bun run build
-        if: steps.check.outputs.changed == 'true'
 
       - run: npm publish --access public
-        if: steps.check.outputs.changed == 'true'
-
-      - run: 'echo "Package version has not been updated, skipping publish"'
-        if: steps.check.outputs.changed == 'false'
