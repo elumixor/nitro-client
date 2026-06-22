@@ -43,6 +43,12 @@ test.describe("Frontend demo UI", () => {
     await expect(page.locator("#log")).toContainText("connected", { timeout: 10000 });
   });
 
+  test("WS /rooms/:room/chat dynamic-param demo connects", async ({ page }) => {
+    await page.click("#btn-room");
+    // Same dev-mode caveat as the static WS demo — assert the upgrade itself succeeds.
+    await expect(page.locator("#log")).toContainText("connected", { timeout: 10000 });
+  });
+
   test("clear log button works", async ({ page }) => {
     await page.click("#btn-hello");
     await expect(page.locator("#log")).toContainText("Hello from nitro-client!", { timeout: 5000 });

@@ -3,7 +3,15 @@ import { defineWebSocketHandler, getRouterParam } from "h3";
 import { type ZodType, z } from "zod";
 
 type SchemaInput = Record<string, ZodType>;
-type InferSchema<S extends SchemaInput> = { [K in keyof S]: S[K] extends ZodType ? z.infer<S[K]> : never };
+// Split keys whose inferred value admits `undefined` (i.e. `.optional()`) into optional TS keys,
+// instead of required keys typed `T | undefined` — otherwise every send()/receive() payload would
+// have to spell out every optional field.
+type UndefinedToOptional<T> = { [K in keyof T as undefined extends T[K] ? never : K]: T[K] } & {
+  [K in keyof T as undefined extends T[K] ? K : never]?: T[K];
+};
+type InferSchema<S extends SchemaInput> = UndefinedToOptional<{
+  [K in keyof S]: S[K] extends ZodType ? z.infer<S[K]> : never;
+}>;
 
 type WsSchemas = { send?: SchemaInput; receive?: SchemaInput };
 export type WsCleanup = () => void;

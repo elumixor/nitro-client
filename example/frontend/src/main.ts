@@ -4,6 +4,7 @@ import { demoPostWithBody } from "./demos/post-with-body";
 import { demoSseStreaming } from "./demos/sse-streaming";
 import { demoSseBackgroundJob } from "./demos/sse-background-job";
 import { demoWebSocket } from "./demos/websocket";
+import { demoWebSocketRoom } from "./demos/websocket-room";
 
 // Wire each button to its demo handler.
 document.getElementById("btn-hello")!.addEventListener("click", demoSimpleGet);
@@ -11,6 +12,7 @@ document.getElementById("btn-greet")!.addEventListener("click", demoPostWithBody
 document.getElementById("btn-countdown")!.addEventListener("click", demoSseStreaming);
 document.getElementById("btn-process")!.addEventListener("click", demoSseBackgroundJob);
 document.getElementById("btn-chat")!.addEventListener("click", demoWebSocket);
+document.getElementById("btn-room")!.addEventListener("click", demoWebSocketRoom);
 
 // Clear log (header + footer buttons).
 document.getElementById("btn-clear")!.addEventListener("click", clearLog);
